@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 import pandas as pd
 from collections import defaultdict
-
+from io import BytesIO
 
 # @dataclass
 class DataIngestion:
@@ -22,7 +22,14 @@ class DataIngestion:
                 return f"Error reading file: {e}"
         else:
             return "No file path provided"      
-        
+    
+    def ingest_from_object(self,object):
+        try : 
+            buffer = BytesIO(object)
+            self.data = pd.read_csv(buffer)
+        except Exception as e:
+            return f"Error reading object: {e}"
+
 
     def ingest_from_db(self,db_connection_string:str,query:str):    
         if db_connection_string is not None:
@@ -47,7 +54,7 @@ class DataIngestion:
             return "No api url provided"    
         
 
-    def map_datatypes(self,schema:dict):
+    def map_datatypes(self,schema:dict = None):
         if schema is not None:
             self.config.schema = schema
             try:
