@@ -85,7 +85,7 @@ class ClusteringEngine:
         for k in range(2, min(self.max_k + 1, len(df))):
             labels = GaussianMixture(k, covariance_type='full', random_state=0).fit_predict(X)
             # kmeans = KMeans(n_clusters=k, random_state=42).fit(X)
-            score = silhouette_score(data, labels)
+            score = silhouette_score(X, labels)
             # score = silhouette_score(X, kmeans.labels_)
             if score > best_score:
                 best_score = score
@@ -101,7 +101,7 @@ class ClusteringEngine:
 
         sub_df = df.loc[indices]
         k = self._best_k_by_silhouette(sub_df)
-        agg_clustering = AgglomerativeClustering(n_clusters=k, random_state=42,linkage='ward')
+        agg_clustering = AgglomerativeClustering(n_clusters=k,linkage='ward')
         labels = agg_clustering.fit_predict(sub_df)
 
         node.score = silhouette_score(sub_df, labels)
@@ -130,8 +130,4 @@ class ClusteringEngine:
 
         return self._build_tree(df, selected_global_indices, level=0, path_prefix="refined")
 
-
-
-
-       
 

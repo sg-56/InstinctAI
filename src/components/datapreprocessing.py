@@ -32,6 +32,7 @@ class DataFramePreprocessor(BaseEstimator, TransformerMixin):
         self.column_transformer_ = None
         self.feature_selector_ = None
         self.columns_removed_ = None
+        self.important_features = None
         
     def fit(self, X, y=None):
         # Validate input is a DataFrame
