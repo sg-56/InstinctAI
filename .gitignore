@@ -12,3 +12,15 @@ wheels/
 data/
 
 .ipynb_checkpoints/
+
+.vscode/
+.env
+*.env
+
+# Jupyter Notebooks
+Untitled.ipynb
+test.py
+
+
+aws_credentials.txt
+
