@@ -78,9 +78,10 @@ class S3Client:
         # S3 doesn't distinguish between create and update – both use upload
         return self.upload_file(file_stream, filename)
 
-    def delete_pro(self, filename: str) -> str:
+    def delete_project(self, project_id: str) -> str:
         try:
-            self.s3.delete_object(Bucket=self.bucket_name, Key=filename)
-            return f"Deleted {filename} successfully."
+            filepath = f"projects/{project_id}/raw_data.parquet"
+            self.s3.delete_object(Bucket=self.bucket_name, Key=filepath)
+            return f"Deleted {project_id} successfully."
         except ClientError as e:
             raise Exception(f"Delete failed: {str(e)}")
