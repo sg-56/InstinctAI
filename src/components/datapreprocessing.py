@@ -7,6 +7,13 @@ from sklearn.metrics import silhouette_score
 import pandas as pd
 import numpy as np
 
+
+import shap
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+import matplotlib.pyplot as plt
+from typing import Union, List, Optional, Tuple, Set, Dict
+import warnings
+
 class DataFramePreprocessor(BaseEstimator, TransformerMixin):
     def __init__(self, numerical_features=None, categorical_features=None, 
                  columns_to_drop=None,
@@ -33,7 +40,19 @@ class DataFramePreprocessor(BaseEstimator, TransformerMixin):
         self.feature_selector_ = None
         self.columns_removed_ = None
         self.important_features = None
+        self.selected_features = None
+
+
+    
+    def setSelectedFeatures(self, selected_features: List[str]):
+        """
+        Set the selected features for the preprocessor.
         
+        Parameters:
+        - selected_features: list of feature names to select
+        """
+        self.selected_features = selected_features
+    
     def fit(self, X, y=None):
         # Validate input is a DataFrame
         if not isinstance(X, pd.DataFrame):
@@ -45,13 +64,14 @@ class DataFramePreprocessor(BaseEstimator, TransformerMixin):
         X_processed = X.drop(columns=self.columns_removed_, errors='ignore')
             
         # If features not specified, use all remaining columns
-        if self.important_features is not None:
+        if self.selected_features is not None:
             columns = X_processed.columns.extend(x for x in self.user_features if x not in X_processed.columns)
             X_processed = X_processed[columns]
         
         if not self.numerical_features and not self.categorical_features:
             self.numerical_features = X_processed.select_dtypes(include=['number']).columns.tolist()
             self.categorical_features = X_processed.select_dtypes(exclude=['number']).columns.tolist()
+            
         
         # Create transformers for numerical and categorical features
         numerical_transformer = Pipeline(steps=[

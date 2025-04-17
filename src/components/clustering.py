@@ -9,9 +9,13 @@ from typing import List, Dict, Any, Union, Optional, Tuple
 from sklearn.cluster import AgglomerativeClustering, KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
-from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
+import shap
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+import matplotlib.pyplot as plt
+import warnings
 from sklearn.metrics import silhouette_score
 import shap
+from auto_shap.auto_shap import generate_shap_values
 
 class ClusterNode:
     def __init__(self, level, data_indices, df, path):
@@ -48,39 +52,253 @@ class ClusteringEngine:
         self.max_k = max_k
         self.discrete_numeric_threshold = discrete_numeric_threshold
         self.original_df = None
+        self.selected_features = None
 
-    def getFeatureImportance(self, data: pd.DataFrame, target=None) -> pd.DataFrame:
-        try: 
-            if target is None:
-                raise ValueError("Target is None")
-            if target not in data.columns:
-                raise ValueError("Target is not in data columns")
-            if data[target].dtype == 'object':
-                model = DecisionTreeClassifier(random_state=42)
+    @staticmethod
+    def feature_selector(
+        data_frame: pd.DataFrame,
+    target_columns: Union[str, List[str]],
+    n_features: Optional[int] = None,
+    threshold: Optional[float] = None,
+    user_selected_features: Optional[List[str]] = None,
+    plot_importance: bool = False,
+    target_weights: Optional[Dict[str, float]] = None,
+    random_state: int = 42
+) -> List[str]:
+        """
+    Select the most important features using SHAP values, supporting multiple target columns
+    and user-specified feature preferences. Task type (regression/classification) is automatically
+    determined based on the data type of the target column(s).
+    
+    Parameters:
+    -----------
+    data_frame : pandas DataFrame
+        DataFrame containing both features and target column(s)
+    target_columns : str or list of str
+        Name(s) of the target column(s) in the DataFrame
+    n_features : int, optional
+        Number of top features to select. Either n_features or threshold must be provided.
+    threshold : float, optional
+        Threshold for cumulative importance. Features are selected until their
+        cumulative importance exceeds this threshold (0-1). Either n_features or threshold must be provided.
+    user_selected_features : list of str, optional
+        List of feature names that the user believes are important and should be included
+        regardless of their SHAP importance
+    plot_importance : bool, default=True
+        Whether to plot feature importance
+    target_weights : dict, optional
+        Dictionary mapping target column names to their importance weights.
+        If not provided, all targets are weighted equally.
+    random_state : int, default=42
+        Random seed for reproducibility
+        
+    Returns:
+    --------
+    selected_features : list
+        List of selected feature names
+    """
+        # Convert target_columns to list if it's a single string
+        if isinstance(target_columns, str):
+            target_columns = [target_columns]
+        
+        # Input validation
+        for col in target_columns:
+            if col not in data_frame.columns:
+                raise ValueError(f"Target column '{col}' does not exist in the data frame")
+        
+        if n_features is None and threshold is None:
+            raise ValueError("Either n_features or threshold must be provided")
+        
+        if threshold is not None and (threshold <= 0 or threshold > 1):
+            raise ValueError("Threshold must be between 0 and 1")
+        
+        if n_features is not None and n_features <= 0:
+            raise ValueError("n_features must be positive")
+        
+        # Separate features and targets
+        X = data_frame.drop(columns=target_columns)
+        
+        if n_features is not None and n_features > X.shape[1]:
+            n_features = X.shape[1]
+            print(f"Warning: n_features was greater than the number of available features. Setting to {n_features}")
+        
+        # Validate user_selected_features
+        if user_selected_features is not None:
+            # Convert to set for faster lookup
+            user_features_set = set(user_selected_features)
+            invalid_features = user_features_set - set(X.columns)
+            if invalid_features:
+                raise ValueError(f"The following user-selected features are not in the dataset: {invalid_features}")
+            
+            # Check if user selected all features
+            if len(user_features_set) == X.shape[1]:
+                print("User selected all features. No SHAP-based selection will be performed.")
+                return list(X.columns)
+        else:
+            user_features_set = set()
+        
+        # Determine task type for each target column
+        task_types = {}
+        for col in target_columns:
+            # Check if the column contains categorical data
+            unique_values = data_frame[col].nunique()
+            if pd.api.types.is_numeric_dtype(data_frame[col]):
+                # For numeric types, if there are few unique values and they're all integers, it's likely classification
+                if unique_values <= 10 and np.array_equal(data_frame[col], data_frame[col].astype(int)):
+                    task_types[col] = 'classification'
+                else:
+                    task_types[col] = 'regression'
             else:
-                model = DecisionTreeRegressor(random_state=42)
+                # Non-numeric types are always classification
+                task_types[col] = 'classification'
+        
+        # Print determined task types
+        print("Automatically determined task types:")
+        for col, task_type in task_types.items():
+            print(f"- {col}: {task_type}")
+        
+        # Handle target weights
+        if target_weights is None:
+            # Equal weights for all targets
+            target_weights = {name: 1.0/len(target_columns) for name in target_columns}
+        else:
+            # Validate target weights
+            missing_targets = set(target_columns) - set(target_weights.keys())
+            if missing_targets:
+                warnings.warn(f"Target weights not provided for: {missing_targets}. Using default weight of 0.")
+                for target in missing_targets:
+                    target_weights[target] = 0.0
+                    
+            # Normalize weights to sum to 1
+            weight_sum = sum(target_weights.values())
+            if weight_sum == 0:
+                raise ValueError("Sum of target weights cannot be zero")
+            target_weights = {k: v/weight_sum for k, v in target_weights.items()}
+        
+        print(f"Processing {len(target_columns)} target{'s' if len(target_columns) > 1 else ''}")
+        for target, weight in target_weights.items():
+            print(f"- {target}: weight = {weight:.3f}")
+        
+        # Calculate feature importance for each target
+        feature_importance_dict = {}
+        shap_values_dict = {}
+        
+        for target_name in target_columns:
+            if target_weights.get(target_name, 0) == 0:
+                print(f"Skipping target '{target_name}' with weight 0")
+                continue
+                
+            print(f"Computing feature importance for target: {target_name}")
             
-            model.fit(data.drop(target, axis=1), data[target])
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(data.drop(target, axis=1))
+            # Get target values
+            y = data_frame[target_name]
             
-            # Handle different shap_values formats based on model type
+            # Get task type for this target
+            task_type = task_types[target_name]
+            
+            # Initialize model based on task type
+            if task_type == 'regression':
+                model = RandomForestRegressor(n_estimators=100, n_jobs = -1, random_state=random_state)
+            elif task_type == 'classification':
+                model = RandomForestClassifier(n_estimators=100,n_jobs = -1, random_state=random_state)
+            else:
+                raise ValueError(f"Invalid task type '{task_type}' for target '{target_name}'")
+            
+            # Fit the model
+            model.fit(X, y)
+            
+            # Create explainer and compute SHAP values
+            _,_,shap_values = generate_shap_values(model,X)
+            # if len(shap_values.shape) == 3:
+            #     shap_values = shap_values[:,:,-1]
+            # shap_values = shap_values[:,:,-1]
+            
+            # For classification tasks with multiple classes, shap_values will be a list
             if isinstance(shap_values, list):
-                # For multi-class classification
-                mean_abs_shap = np.abs(np.array(shap_values)).mean(axis=0).mean(axis=0)
+                # Sum across all classes
+                shap_values = np.abs(np.array(shap_values)).sum(axis=0)
+            
+            # Store for later use
+            shap_values_dict[target_name] = shap_values['shap_value'].values
+            
+            # Calculate feature importance as mean absolute SHAP value for each feature
+            feature_importance_dict = shap_values.set_index('feature').to_dict()['shap_value']
+            # feature_importance_dict[target_name] = feature_importance.set_index('feature').to_dict()['shap_value']
+            
+        # Combine feature importance from all targets using weights
+        combined_importance = np.zeros(X.shape[1])
+        # print(feature_importance_dict)
+        for target_name, importance in feature_importance_dict.items():
+            weight = target_weights.get(target_name, 0)
+            combined_importance += importance * weight
+        # print(combined_importance)
+        
+        # Create DataFrame with feature names and importance
+        feature_importance_df = pd.DataFrame({
+            'Feature': X.columns,
+            'Importance': combined_importance,
+            'User_Selected': [feature in user_features_set for feature in X.columns]
+        }).sort_values('Importance', ascending=False)
+        
+        # Also create target-specific importance dataframes for plotting
+        target_importance_dfs = {}
+        for target_name, importance in feature_importance_dict.items():
+            target_importance_dfs[target_name] = pd.DataFrame({
+                'Feature': X.columns,
+                'Importance': importance
+            }).sort_values('Importance', ascending=False)
+        
+        
+            
+           
+        
+        # Start with user-selected features
+        selected_features = list(user_features_set)
+        
+        # Add features based on SHAP importance (excluding those already selected by user)
+        remaining_features = feature_importance_df[~feature_importance_df['User_Selected']]
+        
+        # Calculate how many additional features to select (if using n_features)
+        if n_features is not None:
+            remaining_n = max(0, n_features - len(selected_features))
+            additional_features = remaining_features['Feature'].tolist()[:remaining_n]
+            selected_features.extend(additional_features)
+        else:
+            # For threshold-based selection, we need to recalculate importance considering already selected features
+            if selected_features:
+                # Calculate the importance of already selected features
+                selected_importance = feature_importance_df[feature_importance_df['User_Selected']]['Importance'].sum()
+                total_importance = feature_importance_df['Importance'].sum()
+                
+                # Calculate the remaining importance needed
+                remaining_importance_needed = min(threshold * total_importance - selected_importance, 
+                                                remaining_features['Importance'].sum())
+                
+                if remaining_importance_needed > 0:
+                    # Calculate cumulative importance for remaining features
+                    remaining_features['Cumulative_Importance'] = remaining_features['Importance'].cumsum()
+                    
+                    # Select features until we reach the needed importance
+                    additional_features = remaining_features[remaining_features['Cumulative_Importance'] <= remaining_importance_needed]['Feature'].tolist()
+                    selected_features.extend(additional_features)
             else:
-                # For regression or binary classification
-                mean_abs_shap = np.abs(shap_values).mean(axis=0)
-    
-            feature_importance_df = pd.DataFrame({
-                "Feature": data.drop(target, axis=1).columns,
-                "Importance": mean_abs_shap
-            }).sort_values(by="Importance", ascending=False).head(10).reset_index(drop=True)
-    
-            return feature_importance_df
-        except Exception as e:
-            print(f"Error in getFeatureImportance: {e}")
-            return pd.DataFrame({"Feature": [], "Importance": []})
+                # If no user-selected features, proceed with normal threshold selection
+                remaining_features['Cumulative_Importance'] = remaining_features['Importance'].cumsum() / feature_importance_df['Importance'].sum()
+                additional_features = remaining_features[remaining_features['Cumulative_Importance'] <= threshold]['Feature'].tolist()
+                selected_features.extend(additional_features)
+        
+        # If no features were selected, take at least the most important one
+        if not selected_features:
+            selected_features = [feature_importance_df['Feature'].iloc[0]]
+        
+        print(f"Selected {len(selected_features)}/{X.shape[1]} features")
+        print(f"- User-selected features: {len(user_features_set)}")
+        print(f"- SHAP-selected features: {len(selected_features) - len(user_features_set)}")
+        
+        return selected_features
+
+
+
 
     def _best_k_by_silhouette(self, df):
         best_k = 2
@@ -171,7 +389,7 @@ class ClusteringEngine:
 
         return node
 
-    def build_cluster_tree(self, df, columns_to_analyze=None):
+    def build_cluster_tree(self, df, columns_to_analyze=None, kpi_columns=None):
         """
         Build a cluster tree and analyze each segment.
         
@@ -187,12 +405,18 @@ class ClusteringEngine:
         
         if columns_to_analyze is None:
             columns_to_analyze = df.columns.tolist()
-            
+
+        self.selected_features = ClusteringEngine.feature_selector(
+            data_frame=df,
+            target_columns=kpi_columns,
+            user_selected_features=columns_to_analyze,
+            threshold=0.5
+        )        
         # Use all indices from the original DataFrame
         indices = df.index.tolist()
         
         return self._build_tree(
-            df, 
+            df[self.selected_features if self.selected_features else df.columns], 
             indices, 
             level=0, 
             path_prefix="root", 
