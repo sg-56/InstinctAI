@@ -20,6 +20,12 @@ data/
 # Jupyter Notebooks
 Untitled.ipynb
 test.py
+model.json
+timeseries.ipynb
+
+#AWS Credentials
+
+*.lock
 
 
 aws_credentials.txt

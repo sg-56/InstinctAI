@@ -9,12 +9,12 @@ from typing import List, Dict, Any, Union, Optional, Tuple
 from sklearn.cluster import AgglomerativeClustering, KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
-import shap
+# import shap
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 import matplotlib.pyplot as plt
 import warnings
 from sklearn.metrics import silhouette_score
-import shap
+import pickle
 from auto_shap.auto_shap import generate_shap_values
 
 class ClusterNode:
@@ -24,7 +24,7 @@ class ClusterNode:
         # Store the actual indices from the original dataframe
         self.indices = data_indices
         # Calculate centroid using the actual rows
-        self.centroid = df.loc[data_indices].mean(axis=0).tolist()
+        # self.centroid = df.loc[data_indices].mean(axis=0).tolist()
         self.size = len(data_indices)
         self.path = path
         self.children = []
@@ -35,7 +35,7 @@ class ClusterNode:
         return {
             "id": self.id,
             "level": self.level,
-            "centroid": self.centroid,
+            # "centroid": self.centroid,
             "size": self.size,
             "indices": self.indices,
             "path": self.path,
@@ -43,6 +43,51 @@ class ClusterNode:
             "analysis": self.analysis,
             "children": [child.to_dict() for child in self.children]
         }
+    
+    @classmethod
+    def from_dict(cls, data, df=None):
+        """Create a ClusterNode from a dictionary representation."""
+        node = cls(
+            level=data["level"],
+            data_indices=data["indices"],
+            df=df,
+            path=data["path"]
+        )
+        node.id = data["id"]
+        # node.centroid = data["centroid"]
+        node.size = data["size"]
+        node.score = data["score"]
+        node.analysis = data["analysis"]
+        
+        # Recursively create children
+        for child_data in data["children"]:
+            child = cls.from_dict(child_data, df)
+            node.children.append(child)
+            
+        return node
+    
+    def save_to_json(self, filepath):
+        """Save the cluster tree to a JSON file."""
+        with open(filepath, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+    
+    @classmethod
+    def load_from_json(cls, filepath, df=None):
+        """Load a cluster tree from a JSON file."""
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        return cls.from_dict(data, df)
+    
+    def save_to_pickle(self, filepath):
+        """Save the cluster tree to a pickle file."""
+        with open(filepath, 'wb') as f:
+            pickle.dump(self, f)
+    
+    @classmethod
+    def load_from_pickle(cls, filepath):
+        """Load a cluster tree from a pickle file."""
+        with open(filepath, 'rb') as f:
+            return pickle.load(f)
 
 
 class ClusteringEngine:
@@ -209,6 +254,8 @@ class ClusteringEngine:
             
             # Create explainer and compute SHAP values
             _,_,shap_values = generate_shap_values(model,X)
+            print("TARGET: ",target_name,shap_values)
+
             # if len(shap_values.shape) == 3:
             #     shap_values = shap_values[:,:,-1]
             # shap_values = shap_values[:,:,-1]
@@ -408,9 +455,9 @@ class ClusteringEngine:
 
         self.selected_features = ClusteringEngine.feature_selector(
             data_frame=df,
-            target_columns=kpi_columns,
-            user_selected_features=columns_to_analyze,
-            threshold=0.5
+            target_columns=kpi_columns or [],
+            user_selected_features=columns_to_analyze or df.columns.tolist(),
+            threshold=0.3
         )        
         # Use all indices from the original DataFrame
         indices = df.index.tolist()
