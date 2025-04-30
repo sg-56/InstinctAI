@@ -18,7 +18,7 @@ import pickle
 from auto_shap.auto_shap import generate_shap_values
 
 class ClusterNode:
-    def __init__(self, level, data_indices, df, path):
+    def __init__(self, level, data_indices, df, path, kpi_column=None):
         self.id = str(uuid.uuid4())
         self.level = level
         # Store the actual indices from the original dataframe
@@ -30,6 +30,7 @@ class ClusterNode:
         self.children = []
         self.score = None
         self.analysis = None
+        self.kpi_column = kpi_column  # Store the KPI column this node is built for
 
     def to_dict(self):
         return {
@@ -41,6 +42,7 @@ class ClusterNode:
             "path": self.path,
             "score": self.score,
             "analysis": self.analysis,
+            "kpi_column": self.kpi_column,
             "children": [child.to_dict() for child in self.children]
         }
     
@@ -51,7 +53,8 @@ class ClusterNode:
             level=data["level"],
             data_indices=data["indices"],
             df=df,
-            path=data["path"]
+            path=data["path"],
+            kpi_column=data.get("kpi_column")  # Handle backward compatibility
         )
         node.id = data["id"]
         # node.centroid = data["centroid"]
@@ -97,51 +100,67 @@ class ClusteringEngine:
         self.max_k = max_k
         self.discrete_numeric_threshold = discrete_numeric_threshold
         self.original_df = None
-        self.selected_features = None
+        self.selected_features = {}  # Dictionary to store selected features for each KPI
+        self.kpi_trees = {}  # Dictionary to store cluster trees for each KPI
+
+    def to_dict(self):
+        """
+        Generate a Dictionary for the clusters.
+        
+        Args:
+            df: DataFrame to convert
+            filepath: Path to save the JSON file
+        """
+        if self.kpi_trees is None: 
+            raise ValueError("No cluster trees stored. Call build_cluster_trees first.")
+        
+        # Convert each tree to a dictionary 
+        return {kpi: tree.to_dict() for kpi, tree in self.kpi_trees.items()}
+
 
     @staticmethod
     def feature_selector(
         data_frame: pd.DataFrame,
-    target_columns: Union[str, List[str]],
-    n_features: Optional[int] = None,
-    threshold: Optional[float] = None,
-    user_selected_features: Optional[List[str]] = None,
-    plot_importance: bool = False,
-    target_weights: Optional[Dict[str, float]] = None,
-    random_state: int = 42
-) -> List[str]:
+        target_columns: Union[str, List[str]],
+        n_features: Optional[int] = None,
+        threshold: Optional[float] = None,
+        user_selected_features: Optional[List[str]] = None,
+        plot_importance: bool = False,
+        target_weights: Optional[Dict[str, float]] = None,
+        random_state: int = 42
+    ) -> List[str]:
         """
-    Select the most important features using SHAP values, supporting multiple target columns
-    and user-specified feature preferences. Task type (regression/classification) is automatically
-    determined based on the data type of the target column(s).
-    
-    Parameters:
-    -----------
-    data_frame : pandas DataFrame
-        DataFrame containing both features and target column(s)
-    target_columns : str or list of str
-        Name(s) of the target column(s) in the DataFrame
-    n_features : int, optional
-        Number of top features to select. Either n_features or threshold must be provided.
-    threshold : float, optional
-        Threshold for cumulative importance. Features are selected until their
-        cumulative importance exceeds this threshold (0-1). Either n_features or threshold must be provided.
-    user_selected_features : list of str, optional
-        List of feature names that the user believes are important and should be included
-        regardless of their SHAP importance
-    plot_importance : bool, default=True
-        Whether to plot feature importance
-    target_weights : dict, optional
-        Dictionary mapping target column names to their importance weights.
-        If not provided, all targets are weighted equally.
-    random_state : int, default=42
-        Random seed for reproducibility
+        Select the most important features using SHAP values, supporting multiple target columns
+        and user-specified feature preferences. Task type (regression/classification) is automatically
+        determined based on the data type of the target column(s).
         
-    Returns:
-    --------
-    selected_features : list
-        List of selected feature names
-    """
+        Parameters:
+        -----------
+        data_frame : pandas DataFrame
+            DataFrame containing both features and target column(s)
+        target_columns : str or list of str
+            Name(s) of the target column(s) in the DataFrame
+        n_features : int, optional
+            Number of top features to select. Either n_features or threshold must be provided.
+        threshold : float, optional
+            Threshold for cumulative importance. Features are selected until their
+            cumulative importance exceeds this threshold (0-1). Either n_features or threshold must be provided.
+        user_selected_features : list of str, optional
+            List of feature names that the user believes are important and should be included
+            regardless of their SHAP importance
+        plot_importance : bool, default=True
+            Whether to plot feature importance
+        target_weights : dict, optional
+            Dictionary mapping target column names to their importance weights.
+            If not provided, all targets are weighted equally.
+        random_state : int, default=42
+            Random seed for reproducibility
+            
+        Returns:
+        --------
+        selected_features : list
+            List of selected feature names
+        """
         # Convert target_columns to list if it's a single string
         if isinstance(target_columns, str):
             target_columns = [target_columns]
@@ -269,16 +288,15 @@ class ClusteringEngine:
             shap_values_dict[target_name] = shap_values['shap_value'].values
             
             # Calculate feature importance as mean absolute SHAP value for each feature
-            feature_importance_dict = shap_values.set_index('feature').to_dict()['shap_value']
-            # feature_importance_dict[target_name] = feature_importance.set_index('feature').to_dict()['shap_value']
+            feature_importance_dict[target_name] = shap_values.set_index('feature').to_dict()['shap_value']
             
         # Combine feature importance from all targets using weights
         combined_importance = np.zeros(X.shape[1])
-        # print(feature_importance_dict)
         for target_name, importance in feature_importance_dict.items():
             weight = target_weights.get(target_name, 0)
-            combined_importance += importance * weight
-        # print(combined_importance)
+            # Get importance values in the same order as X.columns
+            importance_values = np.array([importance.get(col, 0) for col in X.columns])
+            combined_importance += importance_values * weight
         
         # Create DataFrame with feature names and importance
         feature_importance_df = pd.DataFrame({
@@ -287,17 +305,15 @@ class ClusteringEngine:
             'User_Selected': [feature in user_features_set for feature in X.columns]
         }).sort_values('Importance', ascending=False)
         
-        # Also create target-specific importance dataframes for plotting
+        # Also create target-specific importance dataframes
         target_importance_dfs = {}
         for target_name, importance in feature_importance_dict.items():
+            # Create importance array in same order as X.columns
+            importance_values = np.array([importance.get(col, 0) for col in X.columns])
             target_importance_dfs[target_name] = pd.DataFrame({
                 'Feature': X.columns,
-                'Importance': importance
+                'Importance': importance_values
             }).sort_values('Importance', ascending=False)
-        
-        
-            
-           
         
         # Start with user-selected features
         selected_features = list(user_features_set)
@@ -342,10 +358,13 @@ class ClusteringEngine:
         print(f"- User-selected features: {len(user_features_set)}")
         print(f"- SHAP-selected features: {len(selected_features) - len(user_features_set)}")
         
-        return selected_features
-
-
-
+        # Store target-specific feature importance for potential individual KPI tree building
+        feature_importance_per_target = {
+            target: target_df.sort_values('Importance', ascending=False)
+            for target, target_df in target_importance_dfs.items()
+        }
+        
+        return selected_features, feature_importance_per_target
 
     def _best_k_by_silhouette(self, df):
         best_k = 2
@@ -365,7 +384,7 @@ class ClusteringEngine:
 
         return best_k
 
-    def _build_tree(self, df, indices, level, path_prefix, perform_analysis=True, columns_to_analyze=None):
+    def _build_tree(self, df, indices, level, path_prefix, perform_analysis=True, columns_to_analyze=None, kpi_column=None):
         """
         Build the cluster tree recursively.
         
@@ -376,12 +395,13 @@ class ClusteringEngine:
             path_prefix: Path prefix for this node
             perform_analysis: Whether to perform analysis
             columns_to_analyze: Columns to analyze
+            kpi_column: The KPI column this tree is built for
             
         Returns:
             ClusterNode: The created node
         """
         # Create node with the provided indices (which are the actual DataFrame indices)
-        node = ClusterNode(level, indices, df, path=[path_prefix])
+        node = ClusterNode(level, indices, df, path=[path_prefix], kpi_column=kpi_column)
 
         # Perform dataset comparison analysis
         if perform_analysis and columns_to_analyze:
@@ -429,49 +449,72 @@ class ClusteringEngine:
                     level + 1, 
                     child_path, 
                     perform_analysis, 
-                    columns_to_analyze
+                    columns_to_analyze,
+                    kpi_column
                 )
                 child_node.path = node.path + [child_path]
                 node.children.append(child_node)
 
         return node
 
-    def build_cluster_tree(self, df, columns_to_analyze=None, kpi_columns=None):
+    def build_cluster_trees(self, df, columns_to_analyze=None, kpi_columns=None):
         """
-        Build a cluster tree and analyze each segment.
+        Build separate cluster trees for each KPI column.
         
         Args:
             df: DataFrame to cluster
             columns_to_analyze: List of columns to analyze in each cluster
+            kpi_columns: List of KPI columns to build trees for
             
         Returns:
-            The root node of the cluster tree
+            Dictionary mapping KPI columns to their respective cluster tree root nodes
         """
         # Store the original dataframe for later retrieval
         self.original_df = df.copy()
         
         if columns_to_analyze is None:
             columns_to_analyze = df.columns.tolist()
+            
+        if kpi_columns is None or len(kpi_columns) == 0:
+            raise ValueError("At least one KPI column must be provided")
+            
+        # Initialize the dictionary to store trees for each KPI
+        self.kpi_trees = {}
+            
+        # For each KPI column, build a separate cluster tree
+        for kpi_column in kpi_columns:
+            print(f"Building cluster tree for KPI: {kpi_column}")
+            
+            # Select features specifically for this KPI
+            features, feature_importances = self.feature_selector(
+                data_frame=df,
+                target_columns=[kpi_column],  # Only this KPI
+                user_selected_features=columns_to_analyze,
+                threshold=0.3
+            )
+            
+            self.selected_features[kpi_column] = features
+            
+            # Use all indices from the original DataFrame
+            indices = df.index.tolist()
+            
+            # Build tree for this specific KPI
+            root_node = self._build_tree(
+                df[features], 
+                indices, 
+                level=0, 
+                path_prefix=f"root_{kpi_column}", 
+                perform_analysis=True, 
+                columns_to_analyze=columns_to_analyze,
+                kpi_column=kpi_column
+            )
+            
+            # Store the tree
+            self.kpi_trees[kpi_column] = root_node
+            
+        return self.kpi_trees
 
-        self.selected_features = ClusteringEngine.feature_selector(
-            data_frame=df,
-            target_columns=kpi_columns or [],
-            user_selected_features=columns_to_analyze or df.columns.tolist(),
-            threshold=0.3
-        )        
-        # Use all indices from the original DataFrame
-        indices = df.index.tolist()
-        
-        return self._build_tree(
-            df[self.selected_features if self.selected_features else df.columns], 
-            indices, 
-            level=0, 
-            path_prefix="root", 
-            perform_analysis=True, 
-            columns_to_analyze=columns_to_analyze
-        )
-
-    def refine_cluster(self, df, indices, n_neighbors=50, columns_to_analyze=None):
+    def refine_cluster(self, df, indices, n_neighbors=50, columns_to_analyze=None, kpi_column=None):
         """
         Refine a cluster using nearest neighbors.
         
@@ -480,6 +523,7 @@ class ClusteringEngine:
             indices: Indices of the data points to refine
             n_neighbors: Number of neighbors to consider
             columns_to_analyze: List of columns to analyze in the refined cluster
+            kpi_column: The KPI column this refined cluster is for
             
         Returns:
             The root node of the refined cluster tree
@@ -514,7 +558,8 @@ class ClusteringEngine:
             level=0, 
             path_prefix="refined", 
             perform_analysis=True, 
-            columns_to_analyze=columns_to_analyze
+            columns_to_analyze=columns_to_analyze,
+            kpi_column=kpi_column
         )
 
     # Node retrieval methods
@@ -570,7 +615,7 @@ class ClusteringEngine:
             DataFrame containing the data points in the cluster
         """
         if self.original_df is None:
-            raise ValueError("No original DataFrame is stored. Call build_cluster_tree first.")
+            raise ValueError("No original DataFrame is stored. Call build_cluster_trees first.")
         
         # Use node.indices which contain actual DataFrame indices
         return self.original_df.loc[node.indices].copy()
@@ -642,60 +687,69 @@ class ClusteringEngine:
         else:
             raise ValueError(f"No node found with path: {path_string}")
     
-    def get_labeled_dataframe(self, root_node: ClusterNode, level: Optional[int] = None) -> pd.DataFrame:
+    def get_labeled_dataframe(self, kpi_column=None, level: Optional[int] = None) -> pd.DataFrame:
         """
         Get the original DataFrame with cluster labels added.
         
         Args:
-            root_node: The root node of the cluster tree
+            kpi_column: The specific KPI column's tree to get labels from (if None, includes all KPI trees)
             level: The specific level to get labels for (if None, includes all levels)
             
         Returns:
             DataFrame with cluster labels as additional columns
         """
-        if self.original_df is None:
-            raise ValueError("No original DataFrame is stored. Call build_cluster_tree first.")
+        if self.original_df is None or not self.kpi_trees:
+            raise ValueError("No cluster trees stored. Call build_cluster_trees first.")
         
         # Start with a copy of the original dataframe
         result_df = self.original_df.copy()
         
-        # Create a mapping of index to path for each level
-        index_to_path_by_level = {}
+        # If specific KPI column provided, only process that tree
+        kpi_trees_to_process = {kpi_column: self.kpi_trees[kpi_column]} if kpi_column in self.kpi_trees else self.kpi_trees
         
-        def _collect_paths(node):
-            if level is None or node.level == level:
-                node_level = node.level
-                if node_level not in index_to_path_by_level:
-                    index_to_path_by_level[node_level] = {}
+        # Process each KPI tree
+        for kpi, root_node in kpi_trees_to_process.items():
+            # Create a mapping of index to path for each level
+            index_to_path_by_level = {}
+            
+            def _collect_paths(node):
+                if level is None or node.level == level:
+                    node_level = node.level
+                    if node_level not in index_to_path_by_level:
+                        index_to_path_by_level[node_level] = {}
+                    
+                    path_str = '_'.join(node.path)
+                    for idx in node.indices:
+                        index_to_path_by_level[node_level][idx] = path_str
                 
-                path_str = '_'.join(node.path)
-                for idx in node.indices:
-                    index_to_path_by_level[node_level][idx] = path_str
+                for child in node.children:
+                    _collect_paths(child)
             
-            for child in node.children:
-                _collect_paths(child)
-        
-        _collect_paths(root_node)
-        
-        # Add columns for each level
-        for lvl in sorted(index_to_path_by_level.keys()):
-            col_name = f"cluster_level_{lvl}"
-            result_df[col_name] = pd.Series(index_to_path_by_level[lvl])
+            _collect_paths(root_node)
             
+            # Add columns for each level
+            for lvl in sorted(index_to_path_by_level.keys()):
+                col_name = f"cluster_{kpi}_level_{lvl}"
+                result_df[col_name] = pd.Series(index_to_path_by_level[lvl])
+                
         return result_df
 
-    # Get all clusters at a specific level as a dictionary of DataFrames
-    def get_all_clusters_at_level(self, root_node: ClusterNode, level: int) -> Dict[str, pd.DataFrame]:
+    # Get all clusters at a specific level for a specific KPI
+    def get_all_clusters_at_level(self, kpi_column, level: int) -> Dict[str, pd.DataFrame]:
         """
-        Get all clusters at a specific level as a dictionary of DataFrames.
+        Get all clusters at a specific level for a specific KPI as a dictionary of DataFrames.
         
         Args:
-            root_node: The root node of the cluster tree
+            kpi_column: The KPI column to get clusters for
             level: The level to get clusters from
             
         Returns:
             Dictionary mapping cluster paths to their DataFrames
         """
+        if kpi_column not in self.kpi_trees:
+            raise ValueError(f"No cluster tree for KPI column: {kpi_column}")
+            
+        root_node = self.kpi_trees[kpi_column]
         nodes = self.get_node_by_level_or_path(root_node, level=level)
         
         result = {}

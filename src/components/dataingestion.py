@@ -107,6 +107,18 @@ class DataIngestion:
                 "rows": duplicate_rows.to_dict(orient="records") if duplicate_row_count > 0 else []
             },
         }
+    
+    def drop_columns(self,columns:list):
+        """
+        Drop specified columns from the DataFrame.
+        """
+        if self.data is not None:
+            self.data.drop(columns=columns, inplace=True, errors='ignore')
+            return self.data.columns.tolist()
+        else:
+            return "Add data"
+        
+
 
     def get_constant_columns(self):
             """
