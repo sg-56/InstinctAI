@@ -30,3 +30,6 @@ timeseries.ipynb
 
 aws_credentials.txt
 
+test_credentials.txt
+*.log
+

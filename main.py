@@ -4,7 +4,7 @@ import random
 import uuid
 from uuid import uuid4
 import bcrypt
-from fastapi import FastAPI, HTTPException, Query, Path, Body, UploadFile, File
+from fastapi import FastAPI, HTTPException, Query, Path, Body, UploadFile, File,Response
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
@@ -22,6 +22,9 @@ from src.s3 import S3Client
 from src.components.dataingestion import DataIngestion
 from src.components.datapreprocessing import DataFramePreprocessor
 from src.components.clustering import ClusteringEngine
+from src.chat import ChatEngine
+
+
 import requests 
 
 
@@ -45,11 +48,16 @@ s3 = S3Client(
     region_name = os.getenv("REGION")
 )
 
+SMTP_SERVER = os.getenv("SMTP_SERVER")
+SMTP_PORT = os.getenv("SMTP_PORT")
+SMTP_EMAIL = os.getenv("SMTP_EMAIL")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 
 ingestor  = DataIngestion()
 processor = DataFramePreprocessor()
 engine    = ClusteringEngine()
+chatManager = ChatEngine(os.getenv("PANDASAI_KEY"))
 
 # 📦 Redis Setup
 redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
@@ -65,11 +73,7 @@ db = client["my-database2"]
 users_col = db["users"]
 projects_col = db["projects"]
 
-# 🔐 SMTP Email
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_EMAIL = "vwvbot@gmail.com"
-SMTP_PASSWORD = "qbfo ucia nhlw mtab"
+
 
 # ✅ Schemas
 class OTPRequest(BaseModel):
@@ -92,6 +96,8 @@ class LogoutRequest(BaseModel):
 
 class ColumnList(BaseModel):
     columns: List[str]
+    class Config:
+        frozen = True
 
 class ProjectModel(BaseModel):
     com_id: str
@@ -103,6 +109,12 @@ class ProjectModel(BaseModel):
     droppedColumns: List[str]
     uploadedFileData: str
     selectedKpi: Optional[str]
+
+
+class NewProject(BaseModel):
+    name:str
+    description:str
+
 
 # ✅ Email Function
 def send_otp(email):
@@ -213,56 +225,67 @@ def logout(data: LogoutRequest):
     redis_client.delete(session_key)
     return {"message": "Logged out successfully"}
 
-@app.post("/{com_id}/projects/")
-def create_project(
-    com_id: str = Path(...),
-    data: ProjectModel = Body(...)
-):
-    try:
-        project_id = str(uuid.uuid4())
-        project_data = {
-            "com_id": com_id,  
-            "project_id": project_id,
-            "name": data["name"],
-            "description": data["description"],
-            "data_uploaded": False,
-            "total_columns": [],
-            "dropped_columns": [],
-            "kpi_columns": [],
-            "important_columns": [],
-            "clusters": None
-            }
-        projects_col.insert_one(project_data)
-        return {
-            "message": "Project created successfully",
-            "project_id": project_id,
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
-
 # ✅ Get Projects
 @app.get("/{com_id}/projects/")
 def get_projects(com_id: str = Path(...)):
+    try:
+        rows = projects_col.find(
+            {"com_id": com_id},
+            {"name": 1, "description": 1,"project_id":1 ,"_id": 0}
+        )
+
+        projects = [{"name": row.get("name", ""), 
+                     "description": row.get("description", ""),
+                     "project_id": row.get("project_id")
+                     } for row in rows]
+
+        return {"projects": projects}
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error fetching projects: {e}")
     
-    rows = projects_col.find({"com_id": com_id})
 
-    projects = []
-    for row in rows:
-        projects.append({
-            "id": str(row["_id"]),
-            "com_id": row["com_id"],
-            "columns": row["columns"],
-            "importantColumnName": row["importantColumnNames"],
-            "kpiList": row["kpiList"],
-            "droppedColumns": row["droppedColumns"],
-            "uploadedFileData": row["uploadedFileData"],
-            "selectedKpi": row["selectedKpi"],
-        })
+@app.get("/{com_id}/projects/{project_id}")
+def get_project_details(com_id:str = Path(...),
+                        project_id:str = Path(...)):
+    try : 
+        result = projects_col.find(
+                {"com_id": com_id,
+                "project_id": project_id,
+                },
+                {'_id': 0}
+        )
+        keys = list([ row  for row in result])
+        return keys[0]
+    
+    except Exception as e :
+        raise HTTPException(500,detail=f"Error Fetching projects: {e}")
 
-    return {"projects": projects}
+@app.delete("/{com_id}/projects/{project_id}")
+def delete_project(com_id: str, project_id: str):
+    try:
+        result = projects_col.delete_one({"com_id": com_id, "project_id": project_id})
+        if result.deleted_count == 0:
+            raise HTTPException(404, "Project not found")
+        return {"message": "Project deleted successfully"}
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error deleting project: {e}")
 
 
+@app.put("/{com_id}/projects/{project_id}")
+def update_project(com_id: str, project_id: str, data = Body(...)):
+    try:
+        result = projects_col.update_one(
+            {"com_id": com_id, "project_id": project_id},
+            {"$set": {
+                "name": data.get("name", ""),
+                "description": data.get("description", "")
+            }}
+        )
+        if result.matched_count == 0:
+            raise HTTPException(404, "Project not found")
+        return {"message": "Project updated successfully"}
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error updating project: {e}")
 
 
 
@@ -273,6 +296,13 @@ async def ingest_csv(project_id: str, file: UploadFile = File(...)):
         ingestor.ingest_from_object(contents)  # ✅ use existing method
         raw_df = ingestor.get_data()
         s3.upload_dataframe(raw_df, project_id)
+        projects_col.find_one_and_update(
+            {"project_id":project_id},
+            {"$set":{
+                "data_uploaded":"true"
+            }}
+        )
+
     except Exception as e:
         raise HTTPException(500, f"Ingest/S3 upload failed: {e}")
     
@@ -280,6 +310,28 @@ async def ingest_csv(project_id: str, file: UploadFile = File(...)):
         "message": f"Raw data for {project_id} uploaded to S3.",
         "columns": raw_df.columns.tolist()
     }
+
+@app.get("/projects/{project_id}/get_data")
+def get_data(project_id:str):
+    try : 
+        data = s3.getFile(project_id)
+        print(data)
+        df = pd.read_parquet(data,)
+        print(df.to_json())
+        return Response(df.to_json(orient="records"), media_type="application/json")
+    
+    except Exception as e:
+        raise HTTPException(500,f"Error occured - {e}")
+    
+
+
+@app.get("/projects/{project_id}/get_columns")
+def get_columns(project_id:str):
+    try:
+        df = pd.read_parquet(s3.getFile(project_id=project_id)).columns
+        return {"columns" : df.to_list()}
+    except Exception as e:
+        raise HTTPException(status_code=404,detail=str(e))
 
 
 
@@ -298,7 +350,32 @@ def update_dropped_columns(project_id: str, column_list: ColumnList):
         raise HTTPException(status_code=500, detail=str(e))
     
 
-
+@app.post("/{com_id}/projects/")
+def create_project(
+    com_id: str = Path(...),
+    data:NewProject = Body(...)
+):
+    try:
+        project_id = str(uuid.uuid4())
+        project_data = {
+            "com_id": com_id,  
+            "project_id": project_id,
+            "name": data.name,
+            "description": data.description,
+            "data_uploaded": False,
+            "total_columns": [],
+            "dropped_columns": [],
+            "kpi_columns": [],
+            "important_columns": [],
+            "clusters": None
+            }
+        projects_col.insert_one(project_data)
+        return {
+            "message": "Project created successfully",
+            "project_id": project_id,
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
@@ -326,6 +403,25 @@ def update_important_columns(project_id: str, column_list: ColumnList):
         if result.modified_count == 0:
             raise Exception("Project not found or no change made.")
         return {"message": "Important columns updated", "important_columns": column_list.columns}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/projects/{project_id}/reset_columns")
+def reset_project_columns(project_id: str):
+    try:
+        result = projects_col.update_one(
+            {"project_id": project_id},
+            {
+                "$set": {
+                    "dropped_columns": [],
+                    "kpi_columns": [],
+                    "important_columns": []
+                }
+            }
+        )
+        if result.matched_count == 0:
+            raise HTTPException(404, detail="Project not found")
+        return {"message": "All column lists reset successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -368,7 +464,32 @@ async def process_cluster(project_id: str):
     return JSONResponse({"project_id": project_id, "cluster_tree": clusters})
 
 
+@app.post("/projects/{project_id}/chat")
+async def chat(
+    project_id = Path(...),
+    data = Body(...)
+):
+    try : 
+        chatManager.read_data(project_id=project_id)
+        response = chatManager.chat_with_data(data["query"])  ## Can we implement persistance for this ??? maybe a mongodb field where it says chat_history?
+        return response
+    except Exception as e:
+        return HTTPException(500,f"Error occured - {e}")
+
+@app.get("/projects/{project_id}/chat_history")
+def get_chat_history(
+                        project_id:str = Path(...)
+                     ):
+    try : 
+        if chatManager.hasData != True:
+            return {
+                    "chat_hostory":
+                        chatManager.get_all_responses()
+                    }
+    except Exception as e:
+        return HTTPException(500,f"Error Occured - {e}")
+
+
 # ✅ Run App
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    app.run()  
