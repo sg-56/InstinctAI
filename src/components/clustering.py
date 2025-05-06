@@ -17,13 +17,14 @@ from sklearn.metrics import silhouette_score
 import pickle
 from auto_shap.auto_shap import generate_shap_values
 
-
 class ClusterNode:
     def __init__(self, level, data_indices, path, kpi_column=None):
         
         self.id = str(uuid.uuid4())
         self.level = level
-        self.indices = data_indices # Store the actual indices from the original dataframe
+         # This contains the feature-selected data for clustering
+        # Store the actual indices from the original dataframe
+        self.indices = data_indices
         # Calculate centroid using the actual rows
         # self.centroid = df.loc[data_indices].mean(axis=0).tolist()
         self.size = len(data_indices)
@@ -37,6 +38,7 @@ class ClusterNode:
         return {
             "id": self.id,
             "level": self.level,
+            # "data": self.data.to_dict(),
             "size": self.size,
             "indices": self.indices,
             "path": self.path,
@@ -99,6 +101,7 @@ class ClusteringEngine:
         self.max_k = max_k
         self.discrete_numeric_threshold = discrete_numeric_threshold
         self.original_df = None
+        self.preprocessed_df = None
         self.collinear_features = {}
         self.selected_features = {}  # Dictionary to store selected features for each KPI
         self.kpi_trees = {}  # Dictionary to store cluster trees for each KPI
@@ -116,6 +119,7 @@ class ClusteringEngine:
         
         # Convert each tree to a dictionary 
         return {kpi: tree.to_dict() for kpi, tree in self.kpi_trees.items()}
+    
 
     def get_collinear_features(self, x, threshold):
         '''
@@ -186,7 +190,7 @@ class ClusteringEngine:
         # Make a copy to avoid modifying the original dataframe
         print(f"Selecting features for target: {target_column}")
         X = df.drop(columns=[target_column]).copy()
-        collinear_features = self.get_collinear_features(X, 0.8)
+        collinear_features = self.get_collinear_features(X.select_dtypes(include="number"), 0.8)
         X.drop(columns=collinear_features, inplace=True)
         self.collinear_features[target_column] = collinear_features
         y = df[target_column].copy()
@@ -255,6 +259,7 @@ class ClusteringEngine:
         """
         # Create a subset of the feature dataset for clustering
         sub_df_features = df_features.loc[indices]
+        # print(sub_df_features.info())
         
         # Create node with the provided indices (which are the actual DataFrame indices)
         node = ClusterNode(level, indices, path=[path_prefix], kpi_column=kpi_column)
@@ -264,14 +269,21 @@ class ClusteringEngine:
             # Use full original dataframe and segment from original dataframe
             full_df = self.original_df.copy()
             segment_df = self.original_df.loc[indices].copy()
-            
+            # print("Full Dataset : ",full_df.index[:10].tolist())
+            # print("Segement Dataset : ",segment_df.index[:10].tolist())
             # Filter analysis to specified columns
-            analyze_cols = [col for col in columns_to_analyze if col in full_df.columns]
+            analyze_cols = full_df.columns
+            # print(full_df.head())
+            # print(segment_df.head())
             node.analysis = self.compare_datasets(
                 full_df=full_df,
                 segment_df=segment_df,
                 columns_to_analyze=analyze_cols
             )
+            del full_df,segment_df
+
+        full_df = self.preprocessed_df.copy()
+        segment_df = self.preprocessed_df.loc[indices].copy()
 
         # Terminal case: reached max depth or min cluster size
         if level >= self.max_depth or len(indices) < self.min_cluster_size:
@@ -314,7 +326,7 @@ class ClusteringEngine:
 
         return node
 
-    def build_cluster_trees(self, df, columns_to_analyze=None, kpi_columns=None):
+    def build_cluster_trees(self, raw_df,df, columns_to_analyze=None, kpi_columns=None):
         """
         Build separate cluster trees for each KPI column.
         
@@ -327,7 +339,8 @@ class ClusteringEngine:
             Dictionary mapping KPI columns to their respective cluster tree root nodes
         """
         # Store the original dataframe for later retrieval
-        self.original_df = df.copy()
+        self.original_df = raw_df.copy()
+        self.preprocessed_df = df.copy()
             
         if kpi_columns is None or len(kpi_columns) == 0:
             raise ValueError("At least one KPI column must be provided")
@@ -354,6 +367,7 @@ class ClusteringEngine:
             # Build tree for this specific KPI
             # Use a feature-filtered dataframe for clustering, but keep original for analysis
             df_features = df[features + [kpi_column]].copy() if kpi_column in df.columns else df[features].copy()
+            print(df_features.head(2))
             
             root_node = self._build_tree(
                 df_features, 
@@ -420,7 +434,6 @@ class ClusteringEngine:
         
         # Get the actual DataFrame indices for these neighbors
         selected_global_indices = [position_to_orig_index[pos] for pos in neighbor_positions]
-
         return self._build_tree(
             df_features, 
             selected_global_indices, 
@@ -520,7 +533,8 @@ class ClusteringEngine:
         Args:
             root_node: The root node of the cluster tree
             path: The exact path to find
-            
+
+ 
         Returns:
             The matching node or None if not found
         """
@@ -646,7 +660,7 @@ class ClusteringEngine:
         Returns:
             Dictionary with analysis results
         """
-        if segment_df.empty:
+        if segment_df is None:
             return {"error": "Segmented dataset is empty"}
         
         result = {}

@@ -23,6 +23,7 @@ from src.components.dataingestion import DataIngestion
 from src.components.datapreprocessing import DataFramePreprocessor
 from src.components.clustering import ClusteringEngine
 from src.chat import ChatEngine
+from src.utils import reduce_memory_usage
 
 
 import requests 
@@ -319,6 +320,7 @@ async def ingest_csv(project_id: str, file: UploadFile = File(...)):
     try:
         ingestor.ingest_from_object(contents)  # ✅ use existing method
         raw_df = ingestor.get_data()
+        raw_df = reduce_memory_usage(raw_df)
         s3.upload_dataframe(raw_df, project_id)
         projects_col.find_one_and_update(
             {"project_id":project_id},
@@ -468,6 +470,7 @@ async def process_cluster(project_id: str):
         raw_stream = s3.getFile(project_id)
         df_raw = pd.read_parquet(raw_stream)
 
+
         # Pass the dropped columns to the processor
         df_proc = processor.fit_transform(df_raw, dropped_columns=dropped_columns)
 
@@ -492,7 +495,7 @@ async def process_cluster(project_id: str):
 async def chat(
     project_id = Path(...),
     data = Body(...)
-):
+    ):
     try : 
         chatManager.read_data(project_id=project_id)
         response = chatManager.chat_with_data(data["query"])  ## Can we implement persistance for this ??? maybe a mongodb field where it says chat_history?
@@ -513,6 +516,19 @@ def get_chat_history(
     except Exception as e:
         return HTTPException(500,f"Error Occured - {e}")
 
+
+@app.get("/projects/{project_id}/clusters/get_clusters")
+def get_dataframe(project_id:str = Path(...),indexes:List[str] = Body(...)):
+    try : 
+        data = s3.getFile(project_id)
+        print(data)
+        df = pd.read_parquet(data)
+        data = df.iloc[indexes,:].to_json()
+        # print(df.to_json())
+        return Response(data, media_type="application/json")
+    
+    except Exception as e:
+        raise HTTPException(500,f"Error occured - {e}")
 
 # ✅ Run App
 if __name__ == "__main__":
