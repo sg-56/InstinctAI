@@ -5,7 +5,7 @@ import uuid
 from uuid import uuid4
 import bcrypt
 from fastapi import FastAPI, HTTPException, Query, Path, Body, UploadFile, File,Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse,HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 import redis
@@ -56,7 +56,6 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 
 ingestor  = DataIngestion()
-processor = DataFramePreprocessor()
 engine    = ClusteringEngine()
 chatManager = ChatEngine(os.getenv("PANDASAI_KEY"))
 
@@ -265,7 +264,7 @@ def get_projects(com_id: str = Path(...)):
 
         return {"projects": projects}
     except Exception as e:
-        raise HTTPException(500, detail=f"Error fetching projects: {e}"
+        raise HTTPException(500, detail=f"Error fetching projects: {e}")
     
 
 @app.get("/{com_id}/projects/{project_id}")
@@ -320,7 +319,7 @@ async def ingest_csv(project_id: str, file: UploadFile = File(...)):
     try:
         ingestor.ingest_from_object(contents)  # ✅ use existing method
         raw_df = ingestor.get_data()
-        raw_df = reduce_memory_usage(raw_df)
+        # raw_df = reduce_memory_usage(raw_df)
         s3.upload_dataframe(raw_df, project_id)
         projects_col.find_one_and_update(
             {"project_id":project_id},
@@ -342,9 +341,10 @@ def get_data(project_id:str):
     try : 
         data = s3.getFile(project_id)
         print(data)
-        df = pd.read_parquet(data,)
-        print(df.to_json())
-        return Response(df.to_json(orient="records"), media_type="application/json")
+        df = pd.read_parquet(data)
+        df = reduce_memory_usage(df)
+        # print(df.to_json())
+        return HTMLResponse(df.to_html(), status_code=200)
     
     except Exception as e:
         raise HTTPException(500,f"Error occured - {e}")
@@ -469,13 +469,13 @@ async def process_cluster(project_id: str):
         # Load raw data from S3
         raw_stream = s3.getFile(project_id)
         df_raw = pd.read_parquet(raw_stream)
-
-
+        # df_raw = reduce_memory_usage(df_raw)
+        processor = DataFramePreprocessor(columns_to_drop=dropped_columns)
         # Pass the dropped columns to the processor
-        df_proc = processor.fit_transform(df_raw, dropped_columns=dropped_columns)
+        df_proc = processor.fit_transform(df_raw)
 
         # Pass the kpi and important columns to the engine
-        root = engine.build_cluster_tree(df_proc, kpi_columns=kpi_columns, columns_to_analyze=important_columns)
+        root = engine.build_cluster_trees(raw_df=df_raw,df=df_proc, kpi_columns=kpi_columns, columns_to_analyze=important_columns)
 
         # Convert the cluster tree to a dictionary format
         clusters = engine.to_dict()
@@ -498,13 +498,13 @@ async def chat(
     ):
     try : 
         chatManager.read_data(project_id=project_id)
-        response = chatManager.chat_with_data(data["query"])  ## Can we implement persistance for this ??? maybe a mongodb field where it says chat_history?
+        response = await chatManager.chat_with_data(data["query"])  ## Can we implement persistance for this ??? maybe a mongodb field where it says chat_history?
         return response
     except Exception as e:
         return HTTPException(500,f"Error occured - {e}")
 
 @app.get("/projects/{project_id}/chat_history")
-def get_chat_history(
+async def get_chat_history(
                         project_id:str = Path(...)
                      ):
     try : 
@@ -517,15 +517,16 @@ def get_chat_history(
         return HTTPException(500,f"Error Occured - {e}")
 
 
-@app.get("/projects/{project_id}/clusters/get_clusters")
-def get_dataframe(project_id:str = Path(...),indexes:List[str] = Body(...)):
+@app.post("/projects/{project_id}/clusters/get_clusters")
+async def get_dataframe(project_id:str = Path(...),indexes:List[str] = Body(...)):
     try : 
-        data = s3.getFile(project_id)
+        data = await s3.getFile(project_id)
         print(data)
         df = pd.read_parquet(data)
-        data = df.iloc[indexes,:].to_json()
+        indexes=[int(i) for i in indexes]
+        data = df.iloc[indexes,:]
         # print(df.to_json())
-        return Response(data, media_type="application/json")
+        return HTMLResponse(data.to_html(),status_code=200)
     
     except Exception as e:
         raise HTTPException(500,f"Error occured - {e}")
