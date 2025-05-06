@@ -242,6 +242,29 @@ def get_projects(com_id: str = Path(...)):
         return {"projects": projects}
     except Exception as e:
         raise HTTPException(500, detail=f"Error fetching projects: {e}")
+
+# ✅ Get Projects
+# Added project_id to the response by shankersingh01
+@app.get("/{com_id}/projects/")
+def get_projects(com_id: str = Path(...)):
+    try:
+        rows = projects_col.find(
+            {"com_id": com_id},
+            {"project_id": 1, "name": 1, "description": 1, "_id": 0}
+        )
+
+        projects = [
+            {
+                "project_id": row.get("project_id", ""),
+                "name": row.get("name", ""),
+                "description": row.get("description", "")
+            }
+            for row in rows
+        ]
+
+        return {"projects": projects}
+    except Exception as e:
+        raise HTTPException(500, detail=f"Error fetching projects: {e}"
     
 
 @app.get("/{com_id}/projects/{project_id}")
@@ -263,7 +286,8 @@ def get_project_details(com_id:str = Path(...),
 @app.delete("/{com_id}/projects/{project_id}")
 def delete_project(com_id: str, project_id: str):
     try:
-        result = projects_col.delete_one({"com_id": com_id, "project_id": project_id})
+        result = projects_col.delete_one({"com_id": com_id, "project_id": project_id}) ##deleting from mongodb
+        s3.delete_project(project_id=project_id) ##delete from S3 
         if result.deleted_count == 0:
             raise HTTPException(404, "Project not found")
         return {"message": "Project deleted successfully"}
@@ -492,4 +516,4 @@ def get_chat_history(
 
 # ✅ Run App
 if __name__ == "__main__":
-    app.run()  
+    app.run()

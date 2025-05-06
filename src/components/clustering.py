@@ -9,20 +9,21 @@ from typing import List, Dict, Any, Union, Optional, Tuple
 from sklearn.cluster import AgglomerativeClustering, KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
-# import shap
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier,RandomForestRegressor
 import matplotlib.pyplot as plt
 import warnings
 from sklearn.metrics import silhouette_score
 import pickle
 from auto_shap.auto_shap import generate_shap_values
 
+
 class ClusterNode:
-    def __init__(self, level, data_indices, df, path, kpi_column=None):
+    def __init__(self, level, data_indices, path, kpi_column=None):
+        
         self.id = str(uuid.uuid4())
         self.level = level
-        # Store the actual indices from the original dataframe
-        self.indices = data_indices
+        self.indices = data_indices # Store the actual indices from the original dataframe
         # Calculate centroid using the actual rows
         # self.centroid = df.loc[data_indices].mean(axis=0).tolist()
         self.size = len(data_indices)
@@ -36,7 +37,6 @@ class ClusterNode:
         return {
             "id": self.id,
             "level": self.level,
-            # "centroid": self.centroid,
             "size": self.size,
             "indices": self.indices,
             "path": self.path,
@@ -52,7 +52,6 @@ class ClusterNode:
         node = cls(
             level=data["level"],
             data_indices=data["indices"],
-            df=df,
             path=data["path"],
             kpi_column=data.get("kpi_column")  # Handle backward compatibility
         )
@@ -94,12 +93,13 @@ class ClusterNode:
 
 
 class ClusteringEngine:
-    def __init__(self, max_depth=3, min_cluster_size=10, max_k=5, discrete_numeric_threshold=25):
+    def __init__(self, max_depth=5, min_cluster_size=10, max_k=6, discrete_numeric_threshold=25):
         self.max_depth = max_depth
         self.min_cluster_size = min_cluster_size
         self.max_k = max_k
         self.discrete_numeric_threshold = discrete_numeric_threshold
         self.original_df = None
+        self.collinear_features = {}
         self.selected_features = {}  # Dictionary to store selected features for each KPI
         self.kpi_trees = {}  # Dictionary to store cluster trees for each KPI
 
@@ -117,254 +117,107 @@ class ClusteringEngine:
         # Convert each tree to a dictionary 
         return {kpi: tree.to_dict() for kpi, tree in self.kpi_trees.items()}
 
+    def get_collinear_features(self, x, threshold):
+        '''
+        Objective:
+            Remove collinear features in a dataframe with a correlation coefficient
+            greater than the threshold. Removing collinear features can help a model 
+            to generalize and improves the interpretability of the model.
 
-    @staticmethod
-    def feature_selector(
-        data_frame: pd.DataFrame,
-        target_columns: Union[str, List[str]],
-        n_features: Optional[int] = None,
-        threshold: Optional[float] = None,
-        user_selected_features: Optional[List[str]] = None,
-        plot_importance: bool = False,
-        target_weights: Optional[Dict[str, float]] = None,
-        random_state: int = 42
-    ) -> List[str]:
+        Inputs: 
+            x: features dataframe
+            threshold: features with correlations greater than this value are removed
+
+        Output: 
+            dataframe that contains only the non-highly-collinear features
+        '''
+
+        # Calculate the correlation matrix
+        corr_matrix = x.corr()
+        iters = range(len(corr_matrix.columns) - 1)
+        drop_cols = []
+
+        # Iterate through the correlation matrix and compare correlations
+        for i in iters:
+            for j in range(i+1):
+                item = corr_matrix.iloc[j:(j+1), (i+1):(i+2)]
+                col = item.columns
+                row = item.index
+                val = abs(item.values)
+
+                # If correlation exceeds the threshold
+                if val >= threshold:
+                    # Print the correlated features and the correlation value
+                    #print(col.values[0], "|", row.values[0], "|", round(val[0][0], 2))
+                    drop_cols.append(col.values[0])
+
+        # Drop one of each pair of correlated columns
+        drops = list(set(drop_cols))
+        return drops
+
+    
+    def feature_selector(self, df: pd.DataFrame, 
+                          target_column: str,
+                          user_selected_features: Optional[List[str]] = None,
+                          regression: bool = None,
+                          random_state: int = 42) -> List[str]:
         """
-        Select the most important features using SHAP values, supporting multiple target columns
-        and user-specified feature preferences. Task type (regression/classification) is automatically
-        determined based on the data type of the target column(s).
+        Perform feature selection using SHAP values.
         
         Parameters:
         -----------
-        data_frame : pandas DataFrame
-            DataFrame containing both features and target column(s)
-        target_columns : str or list of str
-            Name(s) of the target column(s) in the DataFrame
-        n_features : int, optional
-            Number of top features to select. Either n_features or threshold must be provided.
-        threshold : float, optional
-            Threshold for cumulative importance. Features are selected until their
-            cumulative importance exceeds this threshold (0-1). Either n_features or threshold must be provided.
+        df : pandas.DataFrame
+            The input dataframe containing features and target variable
+        target_column : str
+            The name of the target variable column
         user_selected_features : list of str, optional
-            List of feature names that the user believes are important and should be included
-            regardless of their SHAP importance
-        plot_importance : bool, default=True
-            Whether to plot feature importance
-        target_weights : dict, optional
-            Dictionary mapping target column names to their importance weights.
-            If not provided, all targets are weighted equally.
+            List of features that user explicitly wants to include
+        regression : bool, optional
+            If True, use RandomForestRegressor, if False use RandomForestClassifier.
+            If None, will be inferred from the target variable type.
         random_state : int, default=42
-            Random seed for reproducibility
+            Random state for reproducibility
             
         Returns:
         --------
-        selected_features : list
+        list
             List of selected feature names
         """
-        # Convert target_columns to list if it's a single string
-        if isinstance(target_columns, str):
-            target_columns = [target_columns]
+        # Make a copy to avoid modifying the original dataframe
+        print(f"Selecting features for target: {target_column}")
+        X = df.drop(columns=[target_column]).copy()
+        collinear_features = self.get_collinear_features(X, 0.8)
+        X.drop(columns=collinear_features, inplace=True)
+        self.collinear_features[target_column] = collinear_features
+        y = df[target_column].copy()
         
-        # Input validation
-        for col in target_columns:
-            if col not in data_frame.columns:
-                raise ValueError(f"Target column '{col}' does not exist in the data frame")
-        
-        if n_features is None and threshold is None:
-            raise ValueError("Either n_features or threshold must be provided")
-        
-        if threshold is not None and (threshold <= 0 or threshold > 1):
-            raise ValueError("Threshold must be between 0 and 1")
-        
-        if n_features is not None and n_features <= 0:
-            raise ValueError("n_features must be positive")
-        
-        # Separate features and targets
-        X = data_frame.drop(columns=target_columns)
-        
-        if n_features is not None and n_features > X.shape[1]:
-            n_features = X.shape[1]
-            print(f"Warning: n_features was greater than the number of available features. Setting to {n_features}")
-        
-        # Validate user_selected_features
-        if user_selected_features is not None:
-            # Convert to set for faster lookup
-            user_features_set = set(user_selected_features)
-            invalid_features = user_features_set - set(X.columns)
-            if invalid_features:
-                raise ValueError(f"The following user-selected features are not in the dataset: {invalid_features}")
-            
-            # Check if user selected all features
-            if len(user_features_set) == X.shape[1]:
-                print("User selected all features. No SHAP-based selection will be performed.")
-                return list(X.columns)
-        else:
-            user_features_set = set()
-        
-        # Determine task type for each target column
-        task_types = {}
-        for col in target_columns:
-            # Check if the column contains categorical data
-            unique_values = data_frame[col].nunique()
-            if pd.api.types.is_numeric_dtype(data_frame[col]):
-                # For numeric types, if there are few unique values and they're all integers, it's likely classification
-                if unique_values <= 10 and np.array_equal(data_frame[col], data_frame[col].astype(int)):
-                    task_types[col] = 'classification'
-                else:
-                    task_types[col] = 'regression'
+        # Determine task type (regression or classification) if not specified
+        if regression is None:
+            # If target contains continuous values, assume regression
+            if pd.api.types.is_numeric_dtype(y) and len(y.unique()) > 10:
+                regression = True
             else:
-                # Non-numeric types are always classification
-                task_types[col] = 'classification'
+                regression = False
         
-        # Print determined task types
-        print("Automatically determined task types:")
-        for col, task_type in task_types.items():
-            print(f"- {col}: {task_type}")
-        
-        # Handle target weights
-        if target_weights is None:
-            # Equal weights for all targets
-            target_weights = {name: 1.0/len(target_columns) for name in target_columns}
+        # Initialize the model based on the task type
+        if regression:
+            model = RandomForestRegressor(random_state=random_state)
         else:
-            # Validate target weights
-            missing_targets = set(target_columns) - set(target_weights.keys())
-            if missing_targets:
-                warnings.warn(f"Target weights not provided for: {missing_targets}. Using default weight of 0.")
-                for target in missing_targets:
-                    target_weights[target] = 0.0
-                    
-            # Normalize weights to sum to 1
-            weight_sum = sum(target_weights.values())
-            if weight_sum == 0:
-                raise ValueError("Sum of target weights cannot be zero")
-            target_weights = {k: v/weight_sum for k, v in target_weights.items()}
+            model = RandomForestClassifier(random_state=random_state)
         
-        print(f"Processing {len(target_columns)} target{'s' if len(target_columns) > 1 else ''}")
-        for target, weight in target_weights.items():
-            print(f"- {target}: weight = {weight:.3f}")
+        # Fit the model
+        model.fit(X, y)
         
-        # Calculate feature importance for each target
-        feature_importance_dict = {}
-        shap_values_dict = {}
+        _, _, importance_df = generate_shap_values(model, X, regression_model=regression, tree_model=True, boosting_model=True)
         
-        for target_name in target_columns:
-            if target_weights.get(target_name, 0) == 0:
-                print(f"Skipping target '{target_name}' with weight 0")
-                continue
-                
-            print(f"Computing feature importance for target: {target_name}")
-            
-            # Get target values
-            y = data_frame[target_name]
-            
-            # Get task type for this target
-            task_type = task_types[target_name]
-            
-            # Initialize model based on task type
-            if task_type == 'regression':
-                model = RandomForestRegressor(n_estimators=100, n_jobs = -1, random_state=random_state)
-            elif task_type == 'classification':
-                model = RandomForestClassifier(n_estimators=100,n_jobs = -1, random_state=random_state)
-            else:
-                raise ValueError(f"Invalid task type '{task_type}' for target '{target_name}'")
-            
-            # Fit the model
-            model.fit(X, y)
-            
-            # Create explainer and compute SHAP values
-            _,_,shap_values = generate_shap_values(model,X)
-            print("TARGET: ",target_name,shap_values)
-
-            # if len(shap_values.shape) == 3:
-            #     shap_values = shap_values[:,:,-1]
-            # shap_values = shap_values[:,:,-1]
-            
-            # For classification tasks with multiple classes, shap_values will be a list
-            if isinstance(shap_values, list):
-                # Sum across all classes
-                shap_values = np.abs(np.array(shap_values)).sum(axis=0)
-            
-            # Store for later use
-            shap_values_dict[target_name] = shap_values['shap_value'].values
-            
-            # Calculate feature importance as mean absolute SHAP value for each feature
-            feature_importance_dict[target_name] = shap_values.set_index('feature').to_dict()['shap_value']
-            
-        # Combine feature importance from all targets using weights
-        combined_importance = np.zeros(X.shape[1])
-        for target_name, importance in feature_importance_dict.items():
-            weight = target_weights.get(target_name, 0)
-            # Get importance values in the same order as X.columns
-            importance_values = np.array([importance.get(col, 0) for col in X.columns])
-            combined_importance += importance_values * weight
+        # Select features based on criteria
+        mean_importance = importance_df['shap_value'].mean()
+        selected_features = importance_df[importance_df['shap_value'] >= mean_importance]['feature'].tolist()
+        if user_selected_features:
+            selected_features = list(set([x for x in selected_features + user_selected_features]))
         
-        # Create DataFrame with feature names and importance
-        feature_importance_df = pd.DataFrame({
-            'Feature': X.columns,
-            'Importance': combined_importance,
-            'User_Selected': [feature in user_features_set for feature in X.columns]
-        }).sort_values('Importance', ascending=False)
-        
-        # Also create target-specific importance dataframes
-        target_importance_dfs = {}
-        for target_name, importance in feature_importance_dict.items():
-            # Create importance array in same order as X.columns
-            importance_values = np.array([importance.get(col, 0) for col in X.columns])
-            target_importance_dfs[target_name] = pd.DataFrame({
-                'Feature': X.columns,
-                'Importance': importance_values
-            }).sort_values('Importance', ascending=False)
-        
-        # Start with user-selected features
-        selected_features = list(user_features_set)
-        
-        # Add features based on SHAP importance (excluding those already selected by user)
-        remaining_features = feature_importance_df[~feature_importance_df['User_Selected']]
-        
-        # Calculate how many additional features to select (if using n_features)
-        if n_features is not None:
-            remaining_n = max(0, n_features - len(selected_features))
-            additional_features = remaining_features['Feature'].tolist()[:remaining_n]
-            selected_features.extend(additional_features)
-        else:
-            # For threshold-based selection, we need to recalculate importance considering already selected features
-            if selected_features:
-                # Calculate the importance of already selected features
-                selected_importance = feature_importance_df[feature_importance_df['User_Selected']]['Importance'].sum()
-                total_importance = feature_importance_df['Importance'].sum()
-                
-                # Calculate the remaining importance needed
-                remaining_importance_needed = min(threshold * total_importance - selected_importance, 
-                                                remaining_features['Importance'].sum())
-                
-                if remaining_importance_needed > 0:
-                    # Calculate cumulative importance for remaining features
-                    remaining_features['Cumulative_Importance'] = remaining_features['Importance'].cumsum()
-                    
-                    # Select features until we reach the needed importance
-                    additional_features = remaining_features[remaining_features['Cumulative_Importance'] <= remaining_importance_needed]['Feature'].tolist()
-                    selected_features.extend(additional_features)
-            else:
-                # If no user-selected features, proceed with normal threshold selection
-                remaining_features['Cumulative_Importance'] = remaining_features['Importance'].cumsum() / feature_importance_df['Importance'].sum()
-                additional_features = remaining_features[remaining_features['Cumulative_Importance'] <= threshold]['Feature'].tolist()
-                selected_features.extend(additional_features)
-        
-        # If no features were selected, take at least the most important one
-        if not selected_features:
-            selected_features = [feature_importance_df['Feature'].iloc[0]]
-        
-        print(f"Selected {len(selected_features)}/{X.shape[1]} features")
-        print(f"- User-selected features: {len(user_features_set)}")
-        print(f"- SHAP-selected features: {len(selected_features) - len(user_features_set)}")
-        
-        # Store target-specific feature importance for potential individual KPI tree building
-        feature_importance_per_target = {
-            target: target_df.sort_values('Importance', ascending=False)
-            for target, target_df in target_importance_dfs.items()
-        }
-        
-        return selected_features, feature_importance_per_target
+        print(f"Selected {len(selected_features)} features for {target_column}")
+        return selected_features
 
     def _best_k_by_silhouette(self, df):
         best_k = 2
@@ -373,7 +226,7 @@ class ClusteringEngine:
 
         for k in range(2, min(self.max_k + 1, len(df))):
             try:
-                labels = GaussianMixture(n_components=k, covariance_type='full', random_state=0).fit_predict(X)
+                labels = KMeans(n_clusters=k, random_state=0).fit_predict(X)
                 score = silhouette_score(X, labels)
                 if score > best_score:
                     best_score = score
@@ -384,12 +237,12 @@ class ClusteringEngine:
 
         return best_k
 
-    def _build_tree(self, df, indices, level, path_prefix, perform_analysis=True, columns_to_analyze=None, kpi_column=None):
+    def _build_tree(self, df_features, indices, level, path_prefix, perform_analysis=True, columns_to_analyze=None, kpi_column=None):
         """
         Build the cluster tree recursively.
         
         Args:
-            df: The full DataFrame
+            df_features: DataFrame with selected features for clustering
             indices: List of indices from the original DataFrame for this cluster
             level: Current depth level
             path_prefix: Path prefix for this node
@@ -400,38 +253,42 @@ class ClusteringEngine:
         Returns:
             ClusterNode: The created node
         """
+        # Create a subset of the feature dataset for clustering
+        sub_df_features = df_features.loc[indices]
+        
         # Create node with the provided indices (which are the actual DataFrame indices)
-        node = ClusterNode(level, indices, df, path=[path_prefix], kpi_column=kpi_column)
-
-        # Perform dataset comparison analysis
-        if perform_analysis and columns_to_analyze:
-            full_df = df.copy()
-            segment_df = df.loc[indices].copy()
+        node = ClusterNode(level, indices, path=[path_prefix], kpi_column=kpi_column)
+    
+        # Perform dataset comparison analysis using the ORIGINAL df
+        if perform_analysis and columns_to_analyze and self.original_df is not None:
+            # Use full original dataframe and segment from original dataframe
+            full_df = self.original_df.copy()
+            segment_df = self.original_df.loc[indices].copy()
+            
+            # Filter analysis to specified columns
+            analyze_cols = [col for col in columns_to_analyze if col in full_df.columns]
             node.analysis = self.compare_datasets(
                 full_df=full_df,
                 segment_df=segment_df,
-                columns_to_analyze=columns_to_analyze
+                columns_to_analyze=analyze_cols
             )
 
         # Terminal case: reached max depth or min cluster size
         if level >= self.max_depth or len(indices) < self.min_cluster_size:
             return node
-
-        # Get the subset of data for this cluster
-        sub_df = df.loc[indices]
         
         # Find optimal number of clusters
-        k = self._best_k_by_silhouette(sub_df)
+        k = self._best_k_by_silhouette(segment_df)
         
         # Perform clustering on the subset
         agg_clustering = AgglomerativeClustering(n_clusters=k, linkage='ward')
-        cluster_labels = agg_clustering.fit_predict(sub_df)
+        cluster_labels = agg_clustering.fit_predict(segment_df)
 
         # Calculate silhouette score
-        node.score = silhouette_score(sub_df, cluster_labels)
+        node.score = silhouette_score(segment_df, cluster_labels)
 
         # Create a mapping from position in sub_df to actual index in original df
-        position_to_index = {i: idx for i, idx in enumerate(sub_df.index)}
+        position_to_index = {i: idx for i, idx in enumerate(segment_df.index)}
 
         # Process each cluster
         for cluster_id in range(k):
@@ -444,7 +301,7 @@ class ClusteringEngine:
             if len(cluster_indices) >= self.min_cluster_size:
                 child_path = f"{path_prefix}_{cluster_id}"
                 child_node = self._build_tree(
-                    df, 
+                    df_features, 
                     cluster_indices, 
                     level + 1, 
                     child_path, 
@@ -471,9 +328,6 @@ class ClusteringEngine:
         """
         # Store the original dataframe for later retrieval
         self.original_df = df.copy()
-        
-        if columns_to_analyze is None:
-            columns_to_analyze = df.columns.tolist()
             
         if kpi_columns is None or len(kpi_columns) == 0:
             raise ValueError("At least one KPI column must be provided")
@@ -486,11 +340,10 @@ class ClusteringEngine:
             print(f"Building cluster tree for KPI: {kpi_column}")
             
             # Select features specifically for this KPI
-            features, feature_importances = self.feature_selector(
-                data_frame=df,
-                target_columns=[kpi_column],  # Only this KPI
-                user_selected_features=columns_to_analyze,
-                threshold=0.3
+            features = self.feature_selector(
+                df=df,
+                target_column=kpi_column,  # Only this KPI
+                user_selected_features=columns_to_analyze
             )
             
             self.selected_features[kpi_column] = features
@@ -499,8 +352,11 @@ class ClusteringEngine:
             indices = df.index.tolist()
             
             # Build tree for this specific KPI
+            # Use a feature-filtered dataframe for clustering, but keep original for analysis
+            df_features = df[features + [kpi_column]].copy() if kpi_column in df.columns else df[features].copy()
+            
             root_node = self._build_tree(
-                df[features], 
+                df_features, 
                 indices, 
                 level=0, 
                 path_prefix=f"root_{kpi_column}", 
@@ -534,8 +390,21 @@ class ClusteringEngine:
             
         if columns_to_analyze is None:
             columns_to_analyze = df.columns.tolist()
+        
+        # If we have a KPI column, use the selected features for that KPI
+        features = None
+        if kpi_column and kpi_column in self.selected_features:
+            features = self.selected_features[kpi_column]
+        
+        # If no features specifically selected or no KPI, use all columns
+        if not features:
+            features = df.columns.tolist()
+            if kpi_column and kpi_column in features:
+                features.remove(kpi_column)
+                
+        df_features = df[features].copy()
             
-        sub_df = df.loc[indices]
+        sub_df = df_features.loc[indices]
         X = sub_df.to_numpy()
         
         # Use at most the number of points we have
@@ -553,7 +422,7 @@ class ClusteringEngine:
         selected_global_indices = [position_to_orig_index[pos] for pos in neighbor_positions]
 
         return self._build_tree(
-            df, 
+            df_features, 
             selected_global_indices, 
             level=0, 
             path_prefix="refined", 
@@ -912,6 +781,7 @@ class ClusteringEngine:
         segment_df: pd.DataFrame, 
         col: str
     ) -> Dict[str, Any]:
+  
         """
         Analyze a continuous numeric column.
         """
@@ -937,4 +807,4 @@ class ClusteringEngine:
                 "sum_contribution_percentage": round(sum_contribution, 2),
                 "mean_contribution_percentage": round(mean_contribution, 2)
             }
-        }
+        } 

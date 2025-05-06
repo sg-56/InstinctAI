@@ -1,6 +1,6 @@
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import OrdinalEncoder, MinMaxScaler
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import silhouette_score
@@ -75,7 +75,7 @@ class DataFramePreprocessor(BaseEstimator, TransformerMixin):
         # Create transformers for numerical and categorical features
         numerical_transformer = Pipeline(steps=[
             ('imputer', SimpleImputer(strategy=self.impute_strategy_num)),
-            ('scaler', StandardScaler() if self.scale_numerical else 'passthrough')
+            ('scaler', MinMaxScaler() if self.scale_numerical else 'passthrough')
         ])
         
         categorical_transformer = Pipeline(steps=[

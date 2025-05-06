@@ -18,10 +18,9 @@ data/
 *.env
 
 # Jupyter Notebooks
-Untitled.ipynb
+*.ipynb
 test.py
 model.json
-timeseries.ipynb
 
 #AWS Credentials
 
