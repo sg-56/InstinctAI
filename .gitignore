@@ -18,17 +18,13 @@ data/
 *.env
 
 # Jupyter Notebooks
-*.ipynb
+
 test.py
 model.json
 
 #AWS Credentials
 
 *.lock
-
-
 aws_credentials.txt
-
-test_credentials.txt
 *.log
 
