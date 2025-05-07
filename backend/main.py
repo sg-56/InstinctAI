@@ -364,7 +364,7 @@ def get_columns(project_id:str):
 @app.post("/projects/{project_id}/drop_columns")
 def update_dropped_columns(project_id: str, column_list: ColumnList):
     try:
-        ingestor.drop_columns(column_list)
+        ingestor.drop_columns(column_list.columns) # changed the argument to column_list.columns by shankersingh01
         result = projects_col.update_one(
             {"project_id": project_id},
             {"$set": {"dropped_columns": column_list.columns}}
@@ -520,7 +520,7 @@ async def get_chat_history(
 @app.post("/projects/{project_id}/clusters/get_clusters")
 async def get_dataframe(project_id:str = Path(...),indexes:List[str] = Body(...)):
     try : 
-        data = await s3.getFile(project_id)
+        data = s3.getFile(project_id)
         print(data)
         df = pd.read_parquet(data)
         indexes=[int(i) for i in indexes]
