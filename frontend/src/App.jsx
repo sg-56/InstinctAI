@@ -4,7 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import "./App.css";
 import UploadFile from "./Pages/UploadFile";
 import SelectColumns from "./Pages/SelectColumns";
-import SelectKpi from "./Pages/SelectKpi";
+import SelectKpi from "./Pages/SelectKPI";
 import ClusteringComponent from "./Pages/ClusteringComponent";
 import Home from "./Pages/Home";
 import NoPage from "./Pages/NoPage";

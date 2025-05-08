@@ -21,7 +21,7 @@ import { updateProject, createProject } from "../redux/projectsSlice";
 import Select from "react-select";
 import axiosInstance from "../utils/axiosInstance";
 import { getAuthState } from "../utils/auth";
-import ChatBot from "../components/ChatBot";
+import ChatBot from "../Components/ChatBot";
 import { FaRobot } from "react-icons/fa";
 
 // Add DUMMY_COLUMNS definition at the top of the file
