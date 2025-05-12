@@ -22,7 +22,7 @@ from src.s3 import S3Client
 from src.components.dataingestion import DataIngestion
 from src.components.datapreprocessing import DataFramePreprocessor
 from src.components.clustering import ClusteringEngine
-from src.chat import ChatEngine
+from src.chat import DataframeAgent
 from src.utils import reduce_memory_usage
 
 
@@ -57,7 +57,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 ingestor  = DataIngestion()
 engine    = ClusteringEngine()
-chatManager = ChatEngine(os.getenv("PANDASAI_KEY"))
+chat_agent = DataframeAgent(api_key=os.getenv("OPEN_AI_KEY",))
 
 # 📦 Redis Setup
 redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
@@ -246,7 +246,7 @@ def get_projects(com_id: str = Path(...)):
 # ✅ Get Projects
 # Added project_id to the response by shankersingh01
 @app.get("/{com_id}/projects/")
-def get_projects(com_id: str = Path(...)):
+def get_all_projects(com_id: str = Path(...)):
     try:
         rows = projects_col.find(
             {"com_id": com_id},
@@ -488,8 +488,22 @@ async def process_cluster(project_id: str):
     except Exception as e:
         raise HTTPException(500, f"Processing failed: {e}")
 
-    return JSONResponse({"project_id": project_id, "cluster_tree": clusters})
+    return JSONResponse({"project_id": project_id, "message": clusters})
 
+#Do not use this for now
+# @app.post("/projects/{project_id}/get_cluster_tree")
+# def get_project_details(project_id:str = Path(...)):
+#     try : 
+#         result = projects_col.find(
+#                 {"project_id": project_id},
+#                 {'_id': 0}
+#         )
+#         keys = list([ row  for row in result])
+#         return keys[0]
+    
+#     except Exception as e :
+#         raise HTTPException(500,detail=f"Error Fetching projects: {e}")
+    
 
 @app.post("/projects/{project_id}/chat")
 async def chat(
@@ -497,24 +511,28 @@ async def chat(
     data = Body(...)
     ):
     try : 
-        chatManager.read_data(project_id=project_id)
-        response = await chatManager.chat_with_data(data["query"])  ## Can we implement persistance for this ??? maybe a mongodb field where it says chat_history?
+        data_frame = s3.getFile(project_id)
+        df = pd.read_parquet(data_frame)
+        query = data["query"]
+        print(df.head(2))
+        chat_agent.load_dataframe(df)
+        response = chat_agent.chat(query=query)
         return response
     except Exception as e:
         return HTTPException(500,f"Error occured - {e}")
 
-@app.get("/projects/{project_id}/chat_history")
-async def get_chat_history(
-                        project_id:str = Path(...)
-                     ):
-    try : 
-        if chatManager.hasData != True:
-            return {
-                    "chat_hostory":
-                        chatManager.get_all_responses()
-                    }
-    except Exception as e:
-        return HTTPException(500,f"Error Occured - {e}")
+# @app.get("/projects/{project_id}/chat_history")
+# async def get_chat_history(
+#                         project_id:str = Path(...)
+#                      ):
+#     try : 
+#         if chatManager.hasData != True:
+#             return {
+#                     "chat_hostory":
+#                         chatManager.get_all_responses()
+#                     }
+#     except Exception as e:
+#         return HTTPException(500,f"Error Occured - {e}")
 
 
 @app.post("/projects/{project_id}/clusters/get_clusters")
