@@ -11,6 +11,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier,RandomForestRegressor
+from sklearn.tree import DecisionTreeClassifier,DecisionTreeRegressor
 import matplotlib.pyplot as plt
 import warnings
 from sklearn.metrics import silhouette_score
@@ -205,15 +206,17 @@ class ClusteringEngine:
         
         # Initialize the model based on the task type
         if regression:
-            model = RandomForestRegressor(random_state=random_state)
+            model = DecisionTreeRegressor(random_state=random_state)
         else:
-            model = RandomForestClassifier(random_state=random_state)
+            model = DecisionTreeClassifier(random_state=random_state)
         
         # Fit the model
         model.fit(X, y)
+        print("Generating Shap Values : ")
         
         _, _, importance_df = generate_shap_values(model, X, regression_model=regression, tree_model=True, boosting_model=True)
         
+        print("Computing Shap values is complete..")
         # Select features based on criteria
         mean_importance = importance_df['shap_value'].mean()
         selected_features = importance_df[importance_df['shap_value'] >= mean_importance]['feature'].tolist()
@@ -224,6 +227,7 @@ class ClusteringEngine:
         return selected_features
 
     def _best_k_by_silhouette(self, df):
+        print("Selecting Best K Value")
         best_k = 2
         best_score = -1
         X = df.to_numpy()
@@ -260,7 +264,7 @@ class ClusteringEngine:
         # Create a subset of the feature dataset for clustering
         sub_df_features = df_features.loc[indices]
         # print(sub_df_features.info())
-        
+        print(f"Building - {path_prefix}")
         # Create node with the provided indices (which are the actual DataFrame indices)
         node = ClusterNode(level, indices, path=[path_prefix], kpi_column=kpi_column)
     
@@ -367,7 +371,7 @@ class ClusteringEngine:
             # Build tree for this specific KPI
             # Use a feature-filtered dataframe for clustering, but keep original for analysis
             df_features = df[features + [kpi_column]].copy() if kpi_column in df.columns else df[features].copy()
-            print(df_features.head(2))
+            # print(df_features.head(2))
             
             root_node = self._build_tree(
                 df_features, 

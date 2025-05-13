@@ -1,13 +1,20 @@
-FROM node:24
+# Official Image using node 20 alphine
+FROM node:20-alpine  
 
-WORKDIR /app
+# working directory 
+WORKDIR /app/fronted
 
-COPY package.json .
+# Changes in package* . json file 
+COPY package*.json ./
 
+# Install Dependencies
 RUN npm install
 
+# Copy all changes on fronted
 COPY . .
 
+# expose the app on port 5173
 EXPOSE 5173
 
-CMD [ "npm", "run", "dev" ]
+# Start your frontend application
+CMD [ "npm", "run", "dev", "--", "--host", "0.0.0.0"]

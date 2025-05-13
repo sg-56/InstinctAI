@@ -24,7 +24,7 @@ from src.components.datapreprocessing import DataFramePreprocessor
 from src.components.clustering import ClusteringEngine
 from src.chat import DataframeAgent
 from src.utils import reduce_memory_usage
-
+import ujson
 
 import requests 
 
@@ -484,11 +484,12 @@ async def process_cluster(project_id: str):
             {"project_id": project_id},
             {"$set": {"clusters": clusters}}
         )
+        res = {"project_id": project_id, "message": clusters}
 
     except Exception as e:
         raise HTTPException(500, f"Processing failed: {e}")
 
-    return JSONResponse({"project_id": project_id, "message": clusters})
+    return Response(ujson.dumps(res))
 
 #Do not use this for now
 # @app.post("/projects/{project_id}/get_cluster_tree")
