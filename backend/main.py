@@ -22,7 +22,7 @@ from src.s3 import S3Client
 from src.components.dataingestion import DataIngestion
 from src.components.datapreprocessing import DataFramePreprocessor
 from src.components.clustering import ClusteringEngine
-from src.chat import DataframeAgent
+from src.chat import ChatEngine
 from src.utils import reduce_memory_usage
 import ujson
 
@@ -57,7 +57,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 ingestor  = DataIngestion()
 engine    = ClusteringEngine()
-chat_agent = DataframeAgent(api_key=os.getenv("OPEN_AI_KEY",))
+chat_agent = ChatEngine(os.getenv("OPEN_AI_KEY"))
 
 # 📦 Redis Setup
 redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
@@ -512,12 +512,9 @@ async def chat(
     data = Body(...)
     ):
     try : 
-        data_frame = s3.getFile(project_id)
-        df = pd.read_parquet(data_frame)
         query = data["query"]
-        print(df.head(2))
-        chat_agent.load_dataframe(df)
-        response = chat_agent.chat(query=query)
+        chat_agent.read_data(s3=s3,project_id=project_id)
+        response = chat_agent.chat_with_data(query=query)
         return response
     except Exception as e:
         return HTTPException(500,f"Error occured - {e}")
