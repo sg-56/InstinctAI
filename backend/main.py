@@ -15,15 +15,15 @@ from bson.objectid import ObjectId
 from dotenv import load_dotenv
 import os
 import string
-import io
-from io import BytesIO
+# import io
+# from io import BytesIO
 import pandas as pd
 from src.s3 import S3Client
 from src.components.dataingestion import DataIngestion
 from src.components.datapreprocessing import DataFramePreprocessor
 from src.components.clustering import ClusteringEngine
-from src.chat import DataframeAgent
-from src.utils import reduce_memory_usage
+from src.chat import ChatEngine
+# from src.utils import reduce_memory_usage
 from datetime import datetime
 
 
@@ -32,7 +32,7 @@ import requests
 
 
 load_dotenv()
-app = FastAPI()
+app = FastAPI(swagger_ui_parameters={"syntaxHighlight": False})
 
 # ✅ CORS setup
 app.add_middleware(
@@ -58,7 +58,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 ingestor  = DataIngestion()
 engine    = ClusteringEngine()
-chat_agent = DataframeAgent(api_key=os.getenv("OPEN_AI_KEY",))
+chat_agent = ChatEngine(API_KEY=os.getenv("OPEN_AI_KEY",)) # type: ignore
 
 # 📦 Redis Setup
 redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
