@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse,HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 import redis
-from typing import List, Optional
+from typing import List, Optional, Union
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
@@ -22,9 +22,10 @@ from src.s3 import S3Client
 from src.components.dataingestion import DataIngestion
 from src.components.datapreprocessing import DataFramePreprocessor
 from src.components.clustering import ClusteringEngine
-from src.chat import ChatEngine
+from src.chat import DataframeAgent
 from src.utils import reduce_memory_usage
-import ujson
+from datetime import datetime
+
 
 import requests 
 
@@ -57,7 +58,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 ingestor  = DataIngestion()
 engine    = ClusteringEngine()
-chat_agent = ChatEngine(os.getenv("OPEN_AI_KEY"))
+chat_agent = DataframeAgent(api_key=os.getenv("OPEN_AI_KEY",))
 
 # 📦 Redis Setup
 redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
@@ -114,6 +115,16 @@ class ProjectModel(BaseModel):
 class NewProject(BaseModel):
     name:str
     description:str
+
+class ClusterStep(BaseModel):
+    clusterIndex: int
+    feature: str
+    value: Union[str, int]
+
+class ClusterJourneyUpdate(BaseModel):
+    project_id: str
+    cluster_journey: List[ClusterStep]
+    cluster_selection_index: int
 
 
 # ✅ Email Function
@@ -231,12 +242,18 @@ def get_projects(com_id: str = Path(...)):
     try:
         rows = projects_col.find(
             {"com_id": com_id},
-            {"name": 1, "description": 1,"project_id":1 ,"_id": 0}
+            {
+                "name": 1,
+                "description": 1,
+                "project_id": 1,
+                "created_at": 1,  # ✅ Include this
+                "_id": 0
+            }
         )
-
         projects = [{"name": row.get("name", ""), 
                      "description": row.get("description", ""),
-                     "project_id": row.get("project_id")
+                     "project_id": row.get("project_id"),
+                     "created_at": row.get("created_at", "")
                      } for row in rows]
 
         return {"projects": projects}
@@ -267,21 +284,21 @@ def get_all_projects(com_id: str = Path(...)):
         raise HTTPException(500, detail=f"Error fetching projects: {e}")
     
 
-@app.get("/{com_id}/projects/{project_id}")
-def get_project_details(com_id:str = Path(...),
-                        project_id:str = Path(...)):
-    try : 
-        result = projects_col.find(
-                {"com_id": com_id,
-                "project_id": project_id,
-                },
-                {'_id': 0}
-        )
-        keys = list([ row  for row in result])
-        return keys[0]
+# @app.get("/{com_id}/projects/{project_id}")
+# def get_project_details(com_id:str = Path(...),
+#                         project_id:str = Path(...)):
+#     try : 
+#         result = projects_col.find(
+#                 {"com_id": com_id,
+#                 "project_id": project_id,
+#                 },
+#                 {'_id': 0}
+#         )
+#         keys = list([ row  for row in result])
+#         return keys[0]
     
-    except Exception as e :
-        raise HTTPException(500,detail=f"Error Fetching projects: {e}")
+#     except Exception as e :
+#         raise HTTPException(500,detail=f"Error Fetching projects: {e}")
 
 @app.delete("/{com_id}/projects/{project_id}")
 def delete_project(com_id: str, project_id: str):
@@ -324,7 +341,8 @@ async def ingest_csv(project_id: str, file: UploadFile = File(...)):
         projects_col.find_one_and_update(
             {"project_id":project_id},
             {"$set":{
-                "data_uploaded":"true"
+                "data_uploaded": True,
+                "total_columns": raw_df.columns.tolist(),
             }}
         )
 
@@ -336,19 +354,35 @@ async def ingest_csv(project_id: str, file: UploadFile = File(...)):
         "columns": raw_df.columns.tolist()
     }
 
-@app.get("/projects/{project_id}/get_data")
-def get_data(project_id:str):
-    try : 
-        data = s3.getFile(project_id)
-        print(data)
-        df = pd.read_parquet(data)
-        df = reduce_memory_usage(df)
-        # print(df.to_json())
-        return HTMLResponse(df.to_html(), status_code=200)
-    
+@app.get("/{com_id}/projects/{project_id}")
+def get_project_details(com_id: str = Path(...),
+                        project_id: str = Path(...)):
+    try:
+        result = projects_col.find_one(
+            {"com_id": com_id, "project_id": project_id},
+            {
+                "_id": 0,                    # Exclude MongoDB's default _id
+                "com_id": 1,
+                "project_id": 1,
+                "name": 1,
+                "description": 1,
+                "created_at": 1,
+                "data_uploaded": 1,
+                "total_columns": 1,
+                "dropped_columns": 1,
+                "kpi_columns": 1,
+                "important_columns": 1,
+                "clusters": 1          # Include if you still want clusters
+                # conversations is NOT included
+            }
+        )
+        if not result:
+            raise HTTPException(404, detail="Project not found")
+        return result
+
     except Exception as e:
-        raise HTTPException(500,f"Error occured - {e}")
-    
+        raise HTTPException(500, detail=f"Error Fetching project: {e}")
+
 
 
 @app.get("/projects/{project_id}/get_columns")
@@ -388,6 +422,7 @@ def create_project(
             "project_id": project_id,
             "name": data.name,
             "description": data.description,
+            "created_at": datetime.utcnow().isoformat(),
             "data_uploaded": False,
             "total_columns": [],
             "dropped_columns": [],
@@ -441,7 +476,8 @@ def reset_project_columns(project_id: str):
                 "$set": {
                     "dropped_columns": [],
                     "kpi_columns": [],
-                    "important_columns": []
+                    "important_columns": [],
+                    "total_columns": [],
                 }
             }
         )
@@ -484,12 +520,11 @@ async def process_cluster(project_id: str):
             {"project_id": project_id},
             {"$set": {"clusters": clusters}}
         )
-        res = {"project_id": project_id, "message": clusters}
 
     except Exception as e:
         raise HTTPException(500, f"Processing failed: {e}")
 
-    return Response(ujson.dumps(res))
+    return JSONResponse({"project_id": project_id, "message": clusters})
 
 #Do not use this for now
 # @app.post("/projects/{project_id}/get_cluster_tree")
@@ -508,16 +543,40 @@ async def process_cluster(project_id: str):
 
 @app.post("/projects/{project_id}/chat")
 async def chat(
-    project_id = Path(...),
-    data = Body(...)
-    ):
-    try : 
+    project_id: str = Path(...),
+    data: dict = Body(...)
+):
+    try:
+        # Load project from DB
+        project = projects_col.find_one({"project_id": project_id})
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # Load file & prepare data
+        data_frame = s3.getFile(project_id)
+        df = pd.read_parquet(data_frame)
+
         query = data["query"]
-        chat_agent.read_data(s3=s3,project_id=project_id)
-        response = chat_agent.chat_with_data(query=query)
-        return response
+        chat_agent.load_dataframe(df)
+        response = chat_agent.chat(query=query)
+
+        # Save conversation in DB
+        new_conversation = {
+            "query": query,
+            "response": response,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        projects_col.update_one(
+            {"project_id": project_id},
+            {"$push": {"conversations": new_conversation}}
+        )
+
+        return {"response": response}
+
     except Exception as e:
-        return HTTPException(500,f"Error occured - {e}")
+        raise HTTPException(status_code=500, detail=f"Error occurred - {e}")
+
 
 # @app.get("/projects/{project_id}/chat_history")
 # async def get_chat_history(
@@ -533,6 +592,29 @@ async def chat(
 #         return HTTPException(500,f"Error Occured - {e}")
 
 
+@app.get("/projects/{project_id}/chat_history")
+async def chat_history(project_id: str = Path(...)):
+    try:
+        # Fetch the project by project_id
+        project = projects_col.find_one(
+            {"project_id": project_id},
+            {"_id": 0, "conversations": 1}
+        )
+
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # Return conversations (empty list if not present)
+        conversations = project.get("conversations") or []
+
+        return {"conversations": conversations}
+
+    except HTTPException:
+        raise  # Re-raise known HTTP errors
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching chat history: {e}")
+
+
 @app.post("/projects/{project_id}/clusters/get_clusters")
 async def get_dataframe(project_id:str = Path(...),indexes:List[str] = Body(...)):
     try : 
@@ -546,6 +628,30 @@ async def get_dataframe(project_id:str = Path(...),indexes:List[str] = Body(...)
     
     except Exception as e:
         raise HTTPException(500,f"Error occured - {e}")
+    
+@app.post("/update-cluster-journey")
+async def update_cluster_journey(data: ClusterJourneyUpdate):
+    # Check if project exists
+    project = projects_col.find_one({"project_id": data.project_id})
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Append new steps to the existing cluster_journey
+    updated_journey = project.get("cluster_journey", []) + [step.dict() for step in data.cluster_journey]
+
+    # Update the document
+    projects_col.update_one(
+        {"project_id": data.project_id},
+        {
+            "$set": {
+                "cluster_journey": updated_journey,
+                "cluster_selection_index": data.cluster_selection_index
+            }
+        }
+    )
+
+    return {"message": "Cluster journey updated successfully."}
 
 # ✅ Run App
 if __name__ == "__main__":
