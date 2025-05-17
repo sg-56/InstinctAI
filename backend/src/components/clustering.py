@@ -24,6 +24,7 @@ class ClusterNode:
         self.score = None
         self.analysis = None
         self.kpi_column = kpi_column
+        self.cluster_definitions = None
 
     def to_dict(self, include_indices=True, include_analysis=True):
         return {
@@ -35,6 +36,7 @@ class ClusterNode:
             "score": self.score,
             "analysis": self.analysis if include_analysis else None,
             "kpi_column": self.kpi_column,
+            "cluster_definitions":self.cluster_definitions,
             "children": [child.to_dict(include_indices, include_analysis) for child in self.children]
         }
 
@@ -136,7 +138,6 @@ class ClusteringEngine:
             
         if level >= self.max_depth or len(indices) < self.min_cluster_size:
             return node
-        
         segment_df = self.preprocessed_df.loc[indices]
         k = self._best_k_by_silhouette(segment_df)
         cluster_labels = MiniBatchKMeans(n_clusters=k, batch_size=1000).fit_predict(segment_df)
@@ -151,7 +152,7 @@ class ClusteringEngine:
                 child_node = self._build_tree(df_features, cluster_indices, level + 1, child_path, perform_analysis, columns_to_analyze, kpi_column)
                 child_node.path = node.path + [child_path]
                 node.children.append(child_node)
-
+        node.cluster_definitions = self.extract_cluster_definitions(node)
         return node
 
     def build_cluster_trees(self, raw_df, df, columns_to_analyze=None, kpi_columns=None):
@@ -291,3 +292,40 @@ class ClusteringEngine:
                 "mean_contribution_percentage": self._calculate_percent(segment_mean, full_mean)
             }
         }
+    def extract_cluster_definitions(self,node:ClusterNode):
+        """
+            Helper function:
+              For each hierarchical cluster, compute:
+              - cluster_mean for each feature
+              - overall_mean for each feature
+              - z_score = (cluster_mean - overall_mean) / overall_std
+              - abs_z_score for sorting
+            Returns dict {cluster_label -> DataFrame}.
+        """
+        
+        numerical_cols = self.original_df.select_dtypes(include='number').columns
+        overall_mean = self.original_df[numerical_cols].mean()
+        overall_std = self.original_df[numerical_cols].std()  # avoid /0
+
+        definitions = {}
+        for idx,cluster in enumerate(node.children):
+            cluster_data = self.original_df[numerical_cols].iloc[node.indices,:]
+            cluster_mean = cluster_data.mean()
+            # print(f'Cluster Mean : {cluster_mean},Overall_mean : {overall_mean} , overall_std : {overall_std}')
+            z_scores = (cluster_mean - overall_mean) / overall_std
+    
+            df_def = pd.DataFrame(
+                {
+                    "feature": numerical_cols,
+                    "cluster_mean": cluster_mean.values,
+                    "overall_mean": overall_mean.values,
+                    "z_score": z_scores.values,
+                }
+            )
+            # print(z_scores)
+            df_def["abs_z_score"] = df_def["z_score"].abs()
+            # Sort by largest absolute z-score
+            df_def.sort_values("abs_z_score", ascending=False, inplace=True)
+            definitions[f'cluster_{idx+1}'] = df_def[['feature','abs_z_score']].set_index('feature').to_dict()
+
+        return definitions
