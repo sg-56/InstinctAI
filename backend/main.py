@@ -25,8 +25,8 @@ from src.components.clustering import ClusteringEngine
 from src.chat import ChatEngine
 # from src.utils import reduce_memory_usage
 from datetime import datetime
-
-
+import io
+import pyarrow.parquet as pq
 import requests 
 
 
@@ -353,6 +353,106 @@ async def ingest_csv(project_id: str, file: UploadFile = File(...)):
         "message": f"Raw data for {project_id} uploaded to S3.",
         "columns": raw_df.columns.tolist()
     }
+@app.post("/upload/other_files/{project_id}")
+def upload_other_files(project_id: str, files: List[UploadFile] = File(...)):
+    uploaded_filenames = []
+    subfolder = "other_files"
+
+    for file in files:
+        # Read uploaded CSV file
+        contents = file.file.read()
+        df = pd.read_csv(io.BytesIO(contents))
+
+        # Convert DataFrame to Parquet format in-memory
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, index=False)
+        buffer.seek(0)
+
+        # Replace spaces and change extension to .parquet
+        original_name = file.filename.rsplit('.', 1)[0]
+        sanitized_name = original_name.replace(" ", "_")
+        filename_parquet = f"{sanitized_name}.parquet"
+
+        # Upload to S3
+        s3.upload_file(
+            file_stream=buffer,
+            project_id=project_id,
+            filename=filename_parquet,
+            subfolder=subfolder
+        )
+
+        uploaded_filenames.append(filename_parquet)
+
+    # Update MongoDB with list of uploaded Parquet filenames
+    projects_col.update_one(
+        {"project_id": project_id},
+        {"$set": {"other_files": uploaded_filenames}},
+        upsert=True
+    )
+
+    return {"uploaded_files": uploaded_filenames}
+
+
+@app.post("/upload/brand_files/{project_id}")
+def upload_brand_files(project_id: str, files: List[UploadFile] = File(...)):
+    uploaded_filenames = []
+    subfolder = "brand_files"
+
+    for file in files:
+        contents = file.file.read()
+        buffer = io.BytesIO(contents)
+        buffer.seek(0)
+
+        # Replace spaces in filename
+        sanitized_name = file.filename.replace(" ", "_")
+
+        s3.upload_file(
+            file_stream=buffer,
+            project_id=project_id,
+            filename=sanitized_name,
+            subfolder=subfolder
+        )
+        uploaded_filenames.append(sanitized_name)
+
+    # Update MongoDB
+    projects_col.update_one(
+        {"project_id": project_id},
+        {"$set": {"brand_files": uploaded_filenames}},
+        upsert=True
+    )
+
+    return {"uploaded_files": uploaded_filenames}
+
+
+@app.post("/upload/domain_files/{project_id}")
+def upload_domain_files(project_id: str, files: List[UploadFile] = File(...)):
+    uploaded_filenames = []
+    subfolder = "domain_files"
+
+    for file in files:
+        contents = file.file.read()
+        buffer = io.BytesIO(contents)
+        buffer.seek(0)
+
+        # Replace spaces in filename
+        sanitized_name = file.filename.replace(" ", "_")
+
+        s3.upload_file(
+            file_stream=buffer,
+            project_id=project_id,
+            filename=sanitized_name,
+            subfolder=subfolder
+        )
+        uploaded_filenames.append(sanitized_name)
+
+    # Update MongoDB
+    projects_col.update_one(
+        {"project_id": project_id},
+        {"$set": {"domain_files": uploaded_filenames}},
+        upsert=True
+    )
+
+    return {"uploaded_files": uploaded_filenames}
 
 
 
