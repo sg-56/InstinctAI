@@ -5,7 +5,7 @@ import uuid
 from uuid import uuid4
 import bcrypt
 from fastapi import FastAPI, HTTPException, Query, Path, Body, UploadFile, File,Response
-from fastapi.responses import JSONResponse,HTMLResponse
+from fastapi.responses import JSONResponse,HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 import redis
@@ -28,7 +28,7 @@ from datetime import datetime
 import io
 import pyarrow.parquet as pq
 import requests 
-
+import zipfile
 
 
 load_dotenv()
@@ -454,7 +454,62 @@ def upload_domain_files(project_id: str, files: List[UploadFile] = File(...)):
 
     return {"uploaded_files": uploaded_filenames}
 
+# @app.get("/download/{file_category}/{project_id}/{filename}")
+# def download_file(file_category: str, project_id: str, filename: str):
+#     """
+#     file_category: 'brand_files' or 'domain_files'
+#     """
+#     if file_category not in {"brand_files", "domain_files"}:
+#         raise HTTPException(status_code=400, detail="Only 'brand_files' and 'domain_files' are allowed")
 
+#     s3_key = f"{project_id}/{file_category}/{filename}"
+
+#     try:
+#         file_data = s3.download_file(project_id=project_id, filename=filename, subfolder=file_category)  # returns bytes
+#         buffer = io.BytesIO(file_data)
+#         buffer.seek(0)
+
+#         return StreamingResponse(
+#             buffer,
+#             media_type="application/octet-stream",
+#             headers={"Content-Disposition": f"attachment; filename={filename}"}
+#         )
+#     except Exception as e:
+#         raise HTTPException(status_code=404, detail=f"File not found: {str(e)}")
+
+@app.get("/download_all_files/{project_id}")
+def download_all_files(project_id: str):
+    subfolders = ["brand_files", "domain_files"]
+    zip_buffer = io.BytesIO()
+
+    try:
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            found_files = False
+
+            for subfolder in subfolders:
+                prefix = f"projects/{project_id}/{subfolder}/"
+                response = s3.s3.list_objects_v2(Bucket=s3.bucket_name, Prefix=prefix)
+                contents = response.get("Contents", [])
+
+                for obj in contents:
+                    file_key = obj["Key"]
+                    filename_in_zip = file_key.replace(f"projects/{project_id}/", "")
+                    file_data = s3.download_file(project_id=project_id, filename=filename_in_zip.split("/")[-1], subfolder=subfolder)
+                    zip_file.writestr(filename_in_zip, file_data)
+                    found_files = True
+
+        if not found_files:
+            raise HTTPException(status_code=404, detail="No brand or domain files found for this project")
+
+        zip_buffer.seek(0)
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename=docs.zip"}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
 
 @app.get("/{com_id}/projects/{project_id}")
 def get_project_details(com_id: str = Path(...),
