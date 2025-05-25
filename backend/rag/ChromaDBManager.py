@@ -11,10 +11,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ChromaDBManager:
-    def __init__(self, persist_directory: str):
+    def __init__(self, persist_directory: str,api_key:str):
         self.persist_directory = persist_directory
         self.client = chromadb.PersistentClient(path=persist_directory)
-        self.embeddings = OpenAIEmbeddings(model = "text-embedding-3-small")
+        self.embeddings = OpenAIEmbeddings(model = "text-embedding-3-small",api_key=api_key)
 
     def add_documents_to_collection(self, documents: List, collection_name: str):
         """Add documents to ChromaDB collection or create it if not exists"""

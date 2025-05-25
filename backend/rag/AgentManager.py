@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 class AgentManager:
     def __init__(self, config):
         self.config = config
-        self.llm = OpenAI(temperature=0)
+        self.llm = OpenAI(temperature=0,api_key=config.openai_api_key)
         self.doc_processor = DocumentProcessor(chunk_size=1000, chunk_overlap=200)
-        self.chroma_manager = ChromaDBManager(config.chroma_persist_dir)
+        self.chroma_manager = ChromaDBManager(config.chroma_persist_dir,api_key=config.openai_api_key)
 
     def ingest_and_index_file(self, file_path: str, collection_name: str):
         """Process and ingest a single uploaded file"""

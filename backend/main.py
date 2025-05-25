@@ -22,17 +22,26 @@ from src.s3 import S3Client
 from src.components.dataingestion import DataIngestion
 from src.components.datapreprocessing import DataFramePreprocessor
 from src.components.clustering import ClusteringEngine
-from src.chat import ChatEngine
+from rag.config import Config
+from rag.AgentManager import AgentManager
+from rag.ChromaDBManager import ChromaDBManager
+from rag.DocumentProcessor import DocumentProcessor
+from rag import ArchitectureRAGSystem
 # from src.utils import reduce_memory_usage
 from datetime import datetime
 import io
 import pyarrow.parquet as pq
 import requests 
 import zipfile
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 load_dotenv()
-app = FastAPI(swagger_ui_parameters={"syntaxHighlight": False})
+app = FastAPI(title="Architecture RAG System" , swagger_ui_parameters={"syntaxHighlight": False})
+
 
 # ✅ CORS setup
 app.add_middleware(
@@ -58,7 +67,23 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 ingestor  = DataIngestion()
 engine    = ClusteringEngine()
-chat_agent = ChatEngine(API_KEY=os.getenv("OPEN_AI_KEY",)) # type: ignore
+
+rag_config = Config(
+    openai_api_key=os.getenv("OPEN_AI_KEY"),
+    brand_docs_dir="./brand_docs",
+    domain_docs_dir="./domain_docs",
+    chroma_persist_dir="./chroma_db",
+    domain_collection_name="domain_knowledge",
+    brand_collection_name="brand_knowledge"
+)
+
+rag_config.validate()
+
+docs_processor = DocumentProcessor()
+chroma_db = ChromaDBManager(persist_directory=rag_config.chroma_persist_dir,api_key=rag_config.openai_api_key)
+rag_system = ArchitectureRAGSystem(config=rag_config)
+
+
 
 # 📦 Redis Setup
 redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
@@ -394,10 +419,10 @@ def upload_other_files(project_id: str, files: List[UploadFile] = File(...)):
 
 
 @app.post("/upload/brand_files/{project_id}")
-def upload_brand_files(project_id: str, files: List[UploadFile] = File(...)):
+async def upload_brand_files(project_id: str, files: List[UploadFile] = File(...)):
     uploaded_filenames = []
     subfolder = "brand_files"
-
+    documents =  []
     for file in files:
         contents = file.file.read()
         buffer = io.BytesIO(contents)
@@ -413,6 +438,9 @@ def upload_brand_files(project_id: str, files: List[UploadFile] = File(...)):
             subfolder=subfolder
         )
         uploaded_filenames.append(sanitized_name)
+        # uploaded_filenames.append(sanitized_name)
+        documents.append(docs_processor.ingest_upload_file(upload_file=file))
+    chroma_db.add_documents_to_collection(documents=documents,collection_name=rag_config.brand_collection_name)
 
     # Update MongoDB
     projects_col.update_one(
@@ -421,14 +449,14 @@ def upload_brand_files(project_id: str, files: List[UploadFile] = File(...)):
         upsert=True
     )
 
-    return {"uploaded_files": uploaded_filenames}
+    return {"ingested_documents": uploaded_filenames}
 
 
 @app.post("/upload/domain_files/{project_id}")
-def upload_domain_files(project_id: str, files: List[UploadFile] = File(...)):
+async def upload_domain_files(project_id: str, files: List[UploadFile] = File(...)):
     uploaded_filenames = []
     subfolder = "domain_files"
-
+    documents = []
     for file in files:
         contents = file.file.read()
         buffer = io.BytesIO(contents)
@@ -444,6 +472,8 @@ def upload_domain_files(project_id: str, files: List[UploadFile] = File(...)):
             subfolder=subfolder
         )
         uploaded_filenames.append(sanitized_name)
+        documents.append(docs_processor.ingest_upload_file(upload_file=file))
+    chroma_db.add_documents_to_collection(documents=documents,collection_name=rag_config.domain_collection_name)
 
     # Update MongoDB
     projects_col.update_one(
@@ -545,7 +575,7 @@ def get_project_details(com_id: str = Path(...),
 @app.get("/projects/{project_id}/get_columns")
 def get_columns(project_id:str):
     try:
-        df = pd.read_parquet(s3.getFile(project_id=project_id)).columns
+        df = s3.get_dataframe(project_id=project_id).columns
         return {"columns" : df.to_list()}
     except Exception as e:
         raise HTTPException(status_code=404,detail=str(e))
@@ -660,9 +690,7 @@ async def process_cluster(project_id: str):
         important_columns = project_data.get("important_columns", [])
 
         # Load raw data from S3
-        raw_stream = s3.getFile(project_id)
-        df_raw = pd.read_parquet(raw_stream)
-        # df_raw = reduce_memory_usage(df_raw)
+        df_raw = s3.get_dataframe(project_id)
         processor = DataFramePreprocessor(columns_to_drop=dropped_columns)
         # Pass the dropped columns to the processor
         df_proc = processor.fit_transform(df_raw)
@@ -710,12 +738,11 @@ async def chat(
             raise HTTPException(status_code=404, detail="Project not found")
 
         # Load file & prepare data
-        data_frame = s3.getFile(project_id)
-        df = pd.read_parquet(data_frame)
+        df = s3.get_dataframe(project_id)
 
         query = data["query"]
-        chat_agent.load_dataframe(df)
-        response = chat_agent.chat(query=query)
+        rag_system.initialize(dataframe=df)
+        response = rag_system.query(question=query)
 
         # Save conversation in DB
         new_conversation = {
@@ -775,9 +802,7 @@ async def chat_history(project_id: str = Path(...)):
 @app.post("/projects/{project_id}/clusters/get_clusters")
 async def get_dataframe(project_id:str = Path(...),indexes:List[str] = Body(...)):
     try : 
-        data = s3.getFile(project_id)
-        print(data)
-        df = pd.read_parquet(data)
+        data = s3.get_dataframe(project_id)
         indexes=[int(i) for i in indexes]
         data = df.iloc[indexes,:]
         # print(df.to_json())

@@ -7,7 +7,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ResponseCoordinator:
-    def __init__(self, domain_agent, brand_agent, table_agent):
+    def __init__(self, config,domain_agent, brand_agent, table_agent):
+        self.config = config
         self.domain_agent = domain_agent
         self.brand_agent = brand_agent
         self.table_agent = table_agent
@@ -34,7 +35,7 @@ Instructions:
 Professional Answer:"""
         )
         
-        self.llm = OpenAI(temperature=0)
+        self.llm = OpenAI(temperature=0,api_key=self.config.openai_api_key)
         self.synth_chain = self.synth_prompt | self.llm
     
     def respond(self, query: str) -> str:

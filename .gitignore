@@ -35,3 +35,8 @@ test_credentials.txt
 
 node_modules/
 backend/exports/
+
+backend/brand_docs/
+backend/domain_docs/
+
+backend/chroma_db/

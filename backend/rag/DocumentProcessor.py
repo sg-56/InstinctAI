@@ -1,10 +1,12 @@
 from typing import List
-from langchain_community.document_loaders import TextLoader, PyPDFLoader, DirectoryLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pathlib import Path
+from langchain_community.document_loaders import TextLoader,PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from fastapi import UploadFile
+import tempfile
+import shutil
 import logging
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class DocumentProcessor:
@@ -17,7 +19,7 @@ class DocumentProcessor:
         )
 
     def ingest_file(self, file_path: str) -> List:
-        """Load, split, and return documents from a specific uploaded file"""
+        """Load, split, and return documents from a file path"""
         path = Path(file_path)
         if not path.exists():
             logger.error(f"File does not exist: {file_path}")
@@ -39,4 +41,23 @@ class DocumentProcessor:
             return self.text_splitter.split_documents(raw_docs)
         except Exception as e:
             logger.error(f"Error processing file {file_path}: {e}")
+            return []
+
+    async def ingest_upload_file(self, upload_file: UploadFile) -> List:
+        """Load, split, and return documents from a FastAPI UploadFile"""
+        suffix = Path(upload_file.filename).suffix.lower()
+
+        if suffix not in {".txt", ".pdf"}:
+            logger.warning(f"Unsupported file type: {suffix}")
+            return []
+
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                shutil.copyfileobj(upload_file.file, tmp)
+                tmp_path = tmp.name
+
+            return self.ingest_file(tmp_path)
+
+        except Exception as e:
+            logger.error(f"Error processing uploaded file {upload_file.filename}: {e}")
             return []

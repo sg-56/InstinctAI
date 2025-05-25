@@ -23,8 +23,8 @@ class ArchitectureRAGSystem:
         """Initialize agents with current Chroma collections and CSV"""
         domain_agent = self.agent_manager.create_retrieval_agent(self.config.domain_collection_name)
         brand_agent = self.agent_manager.create_retrieval_agent(self.config.brand_collection_name)
-        table_agent = self.agent_manager.create_table_agent(self.config.dataframe)
-        self.coordinator = ResponseCoordinator(domain_agent, brand_agent, table_agent)
+        table_agent = self.agent_manager.create_table_agent(dataframe)
+        self.coordinator = ResponseCoordinator(self.config,domain_agent, brand_agent, table_agent)
 
     def ingest_file_to_domain(self, file_path: str):
         return self.agent_manager.ingest_and_index_file(file_path, self.config.domain_collection_name)
