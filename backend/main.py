@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse,HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 import redis
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
@@ -34,6 +34,12 @@ import pyarrow.parquet as pq
 import requests 
 import zipfile
 import logging
+from src.timeseries import TimeSeriesAnalyzer
+import tempfile
+import base64
+import plotly.io as pio
+from plotly.utils import PlotlyJSONEncoder
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -67,6 +73,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 ingestor  = DataIngestion()
 engine    = ClusteringEngine()
+tsa = TimeSeriesAnalyzer()
 
 rag_config = Config(
     openai_api_key=os.getenv("OPEN_AI_KEY"),
@@ -98,7 +105,7 @@ client = MongoClient(mongo_uri)
 db = client["my-database2"]
 users_col = db["users"]
 projects_col = db["projects"]
-
+time_series_col = db["time_series"]
 
 
 # ✅ Schemas
@@ -150,6 +157,16 @@ class ClusterJourneyUpdate(BaseModel):
     project_id: str
     cluster_journey: List[ClusterStep]
     cluster_selection_index: int
+
+
+
+class ForecastRequest(BaseModel):
+    project_id: str
+    subfolder: Optional[str] = "other_files"
+    kpi: str
+    no_of_months: int
+    # date_column: str
+    adjustments: Dict[str, str]
 
 
 # ✅ Email Function
@@ -329,7 +346,7 @@ def get_all_projects(com_id: str = Path(...)):
 def delete_project(com_id: str, project_id: str):
     try:
         result = projects_col.delete_one({"com_id": com_id, "project_id": project_id}) ##deleting from mongodb
-        s3.delete_project(project_id=project_id) ##delete from S3 
+        s3.delete_file(project_id=project_id, filename='raw_data.parquet') ##delete from S3 
         if result.deleted_count == 0:
             raise HTTPException(404, "Project not found")
         return {"message": "Project deleted successfully"}
@@ -803,8 +820,9 @@ async def chat_history(project_id: str = Path(...)):
 async def get_dataframe(project_id:str = Path(...),indexes:List[str] = Body(...)):
     try : 
         data = s3.get_dataframe(project_id)
+        # df = pd.read_parquet(data)
         indexes=[int(i) for i in indexes]
-        data = df.iloc[indexes,:]
+        data = data.iloc[indexes,:]
         # print(df.to_json())
         return HTMLResponse(data.to_html(),status_code=200)
     
@@ -834,6 +852,225 @@ async def update_cluster_journey(data: ClusterJourneyUpdate):
     )
 
     return {"message": "Cluster journey updated successfully."}
+
+@app.get("/get-cluster-journey/")
+async def get_cluster_journey(project_id: str):
+    project = projects_col.find_one({"project_id": project_id})
+
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    cluster_journey = project.get("cluster_journey", [])
+
+    return {"project_id": project_id, "cluster_journey": cluster_journey}
+
+
+@app.get("/get-aggregated-data/")
+def get_aggregated_data(project_id: str, subfolder: Optional[str] = "other_files") -> Dict:
+    """
+    Returns the aggregated parquet file as a DataFrame.
+    """
+    try:
+        df = s3.get_aggregated_dataframe(project_id, subfolder)
+        return {"data": df.to_dict(orient="records")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch aggregated data: {e}")
+
+
+
+# Detecting Date Columns 
+@app.get("/detect-columns/")
+def detect_columns(project_id: str) -> Dict:
+    """
+    Detects all date columns and categorical (object) columns.
+    """
+    try:
+        df = s3.get_dataframe(project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load data: {e}")
+
+    def is_valid_date_series(series):
+        try:
+            converted = pd.to_datetime(series, errors='coerce')
+            return converted.notna().sum() > 0 and converted.nunique() > 10
+        except:
+            return False
+
+    # Detect all date-like columns
+    date_cols = []
+    likely_cols = [col for col in df.columns if any(k in col.lower() for k in ["date", "time", "timestamp"])]
+    
+    # Check likely columns first
+    for col in likely_cols:
+        if is_valid_date_series(df[col]):
+            date_cols.append(col)
+
+    # Check remaining columns if not already added
+    for col in df.columns:
+        if col not in date_cols:
+            if is_valid_date_series(df[col]):
+                date_cols.append(col)
+
+    if not date_cols:
+        raise HTTPException(status_code=400, detail="Could not detect any valid date columns")
+
+    return {
+        "detected_date_columns": date_cols,
+    }
+
+@app.get("/run-pipeline/")
+def run_full_pipeline(
+    project_id: str,
+    kpi_col: str,
+    date_col: str,
+    subfolder: Optional[str] = "",
+    keep_medium: bool = True,
+    low_pct: float = 0.25,
+    high_pct: float = 0.75
+) -> Dict:
+    """
+    Runs the full workflow:
+      1. report_missing_dates
+      2. bucket_dummies_clean
+      3. aggregate_columns_by_date
+
+    Returns all intermediate and final results.
+    """
+    # 1. Load DataFrame
+    try:
+        df = s3.get_dataframe(project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load data: {e}")
+
+    # indices = projects_col["clusters"][kpi_col]["indices"]
+    # clustered_df = df.iloc[indices, :]
+
+    # 2. Missing dates report
+    try:
+        report = tsa.report_missing_dates(df, date_col)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate missing date report: {e}")
+
+    # 3. Save date_col to MongoDB
+    try:
+        time_series_col.update_one(
+            {"project_id": project_id},
+            {"$set": {"date_col": date_col}},
+            upsert=True
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save date_col in time_series_col: {e}")
+    
+    # Convert date column to datetime
+    try:
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to convert {date_col} to datetime: {e}")
+
+    # Convert non-numeric, non-date columns to 'category'
+    for col in df.columns:
+        if col == date_col:
+            continue
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].astype("category")
+
+    # 4. Bucket encoding
+    cat_list = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    print(cat_list)
+    print(kpi_col)
+    try:
+        df_buck, perf_maps = tsa.bucket_dummies_clean(df, cat_list, kpi_col, keep_medium, low_pct, high_pct)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bucket encoding failed: {e}")
+
+    # 5. Aggregate by date
+    try:
+        df_agg = tsa.aggregate_columns_by_date(df_buck, date_col)
+        buffer = io.BytesIO()
+        df_agg.to_parquet(buffer)
+        buffer.seek(0)
+        filename = "time_series.parquet"
+        subfolder = subfolder or "other_files"
+        upload_msg = s3.upload_file(buffer, project_id, filename, subfolder)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to aggregate/upload data: {e}")
+
+    return {
+        "missing_dates_report": report,
+        # "perf_maps": {k: v.to_dict(orient="records") for k, v in perf_maps.items()},
+        # "aggregated_records": df_agg.to_dict(orient="records"),
+        "upload_status": upload_msg
+    }
+
+
+@app.get("/feature-ranking/")
+def feature_ranking(
+    project_id: str,
+    target_col: str,
+    subfolder: Optional[str] = "other_files"
+):
+    """
+    Runs ensemble feature importance on pre-aggregated data and returns top 5 features.
+    """
+    try:
+        # Load pre-aggregated data
+        df = s3.get_aggregated_dataframe(project_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load aggregated data: {e}")
+
+    if target_col not in df.columns:
+        raise HTTPException(status_code=400, detail="Target column not found in data")
+
+    features = df.select_dtypes(include=["number"]).columns.difference([target_col]).tolist()
+
+    try:
+        feat_imp = tsa.ensemble_feature_importance_auto(df, target_col, features)
+        # top_features = feat_imp.sort_values(by="importance", ascending=False).head(5)
+        top_features = feat_imp.sort_values(by="final_importance", ascending=False).head(5)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to calculate feature importance: {e}")
+
+    return {
+        "top_5_feature_importances": top_features.to_dict(orient="records")
+    }
+
+
+@app.post("/run-time-series-forecast/")
+def run_forecast(request: ForecastRequest):
+    try:
+        df = s3.get_aggregated_dataframe(request.project_id, request.subfolder)
+        record = time_series_col.find_one({"project_id": request.project_id})
+        if not record or "date_col" not in record:
+            raise HTTPException(status_code=404, detail="date_col not found for this project")
+
+        date_col = record["date_col"]
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.csv', delete=False) as tmp:
+            df.to_csv(tmp.name, index=False)
+            csv_path = tmp.name
+        
+
+        fig = tsa.time_series_analysis(
+            input_file_path_raw_data_csv=csv_path,
+            kpi=request.kpi,
+            no_of_months=request.no_of_months,
+            date_column=date_col,
+            adjustments=request.adjustments
+        )
+
+        # Return Plotly figure data as JSON
+        plotly_json = json.loads(json.dumps(fig, cls=PlotlyJSONEncoder))
+
+        return JSONResponse(content=plotly_json)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Forecasting failed: {e}")
+    
+
+
+
+
+
 
 # ✅ Run App
 if __name__ == "__main__":
