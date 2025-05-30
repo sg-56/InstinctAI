@@ -69,6 +69,14 @@ class S3Client:
         buffer = self.get_file_as_buffer(project_id, "raw_data.parquet", subfolder)
         return pd.read_parquet(buffer)
 
+    def get_aggregated_dataframe(self, project_id: str, subfolder: Optional[str] = "other_files") -> pd.DataFrame:
+        try:
+            buffer = self.get_file_as_buffer(project_id, "time_series.parquet", subfolder)
+            df = pd.read_parquet(buffer)
+            return df
+        except Exception as e:
+            raise Exception(f"Failed to fetch aggregated parquet: {e}")
+
     def update_file(self, file_stream, project_id: str, filename: str, subfolder: Optional[str] = "") -> str:
         return self.upload_file(file_stream, project_id, filename, subfolder)
 
