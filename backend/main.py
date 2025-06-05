@@ -151,7 +151,9 @@ class NewProject(BaseModel):
 class ClusterStep(BaseModel):
     clusterIndex: int
     feature: str
-    value: Union[str, int]
+    value: Union[str, int, float]  # Adjust if the value can vary
+    level: int
+    path: List[Union[str, int, float]]  # Can be refined if type is known
 
 class ClusterJourneyUpdate(BaseModel):
     project_id: str
@@ -346,7 +348,7 @@ def get_all_projects(com_id: str = Path(...)):
 def delete_project(com_id: str, project_id: str):
     try:
         result = projects_col.delete_one({"com_id": com_id, "project_id": project_id}) ##deleting from mongodb
-        s3.delete_file(project_id=project_id, filename='raw_data.parquet') ##delete from S3 
+        s3.delete_project_files(project_id=project_id) ##removes the files from s3
         if result.deleted_count == 0:
             raise HTTPException(404, "Project not found")
         return {"message": "Project deleted successfully"}

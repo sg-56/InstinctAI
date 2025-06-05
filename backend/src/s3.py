@@ -117,3 +117,31 @@ class S3Client:
             return [item["Key"] for item in response["Contents"] if not item["Key"].endswith("/")]
         except ClientError as e:
             raise Exception(f"List project files failed: {str(e)}")
+
+    def delete_project_files(self, project_id: str) -> str:
+        try:
+            prefix = f"projects/{project_id}/"
+            response = self.s3.list_objects_v2(Bucket=self.bucket_name, Prefix=prefix)
+
+            if "Contents" not in response:
+                return f"No files found for project {project_id}."
+
+            # Prepare a list of objects to delete
+            objects_to_delete = [{"Key": obj["Key"]} for obj in response["Contents"]]
+
+            # Perform batch deletion (up to 1000 at a time)
+            delete_response = self.s3.delete_objects(
+                Bucket=self.bucket_name,
+                Delete={"Objects": objects_to_delete}
+            )
+
+            deleted = [obj["Key"] for obj in delete_response.get("Deleted", [])]
+            errors = delete_response.get("Errors", [])
+
+            message = f"Deleted {len(deleted)} file(s) for project {project_id}."
+            if errors:
+                message += f" However, {len(errors)} error(s) occurred during deletion."
+            return message
+
+        except ClientError as e:
+            raise Exception(f"Failed to delete project files: {str(e)}")
